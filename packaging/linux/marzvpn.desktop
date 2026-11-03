@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=MARZ VPN
+Comment=Fast, private internet with one tap
+Comment[ru]=Быстрый и приватный интернет одним нажатием
+Exec=/usr/bin/marzvpn
+Icon=/usr/share/icons/hicolor/256x256/apps/marzvpn.png
+Terminal=false
+Categories=Network;
+StartupWMClass=Marzvpn

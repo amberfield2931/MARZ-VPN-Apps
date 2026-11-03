@@ -1,0 +1,13 @@
+MARZ VPN: getting ordinary internet back (Windows).
+A restart does not remove the block while the VPN is left on: that is by design.
+
+1. Open MARZ VPN and press the big button.
+2. Settings > "Emergency: turn off VPN and restore the internet".
+3. Administrator Command Prompt:
+     "C:\Program Files\MARZ VPN\marzvpn-helper.exe" --recover
+4. Uninstall MARZ VPN (Settings > Apps, or uninstall.exe in its folder). This also removes the block.
+5. Administrator PowerShell, script kept next to the installer:
+     powershell -NoProfile -ExecutionPolicy Bypass -File .\marzvpn-wfp-recover.ps1 -Apply
+
+Do not disable Windows Defender, Windows Firewall or the Base Filtering Engine service.
+Check: netsh wfp show filters file=%TEMP%\wfp.xml, then findstr /c:"MARZ VPN" %TEMP%\wfp.xml finds nothing.

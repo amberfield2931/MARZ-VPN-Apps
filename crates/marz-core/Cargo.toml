@@ -1,0 +1,48 @@
+[package]
+name = "marz-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = ["os-keyring"]
+os-keyring = ["dep:keyring"]
+# Test builds only: allows http:// to a lab server and a fixed vault key. Never enabled in a package
+# (packaging/linux/build-deb.sh fails if a release binary was built with it).
+lab = []
+
+[dependencies]
+marz-engine = { path = "../marz-engine" }
+serde.workspace = true
+serde_json.workspace = true
+aes-gcm = "0.10"
+base64 = "0.22"
+getrandom = "0.2"
+httparse = "1"
+p256 = { version = "0.13", features = ["ecdsa", "pkcs8"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-native-certs = "0.8"
+rustls-pki-types = "1"
+sha2 = "0.10"
+webpki = { package = "rustls-webpki", version = "0.103", default-features = false, features = ["std", "ring"] }
+x509-parser = { version = "0.17", default-features = false }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { version = "3", optional = true, default-features = false, features = ["async-secret-service", "crypto-rust", "tokio"] }
+
+[target.'cfg(windows)'.dependencies]
+keyring = { version = "3", optional = true, default-features = false, features = ["windows-native"] }
+windows-sys = { version = "0.60", features = ["Win32_System_SystemInformation"] }
+
+[[bin]]
+name = "marz-lab-client"
+path = "src/bin/lab_client.rs"
+required-features = ["lab"]
+
+[[bin]]
+name = "marz-controller-lab"
+path = "src/bin/controller_lab.rs"
+required-features = ["lab"]

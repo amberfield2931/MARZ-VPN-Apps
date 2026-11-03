@@ -1,0 +1,16 @@
+MARZ VPN: getting ordinary internet back
+
+The normal way: open MARZ VPN and press the big button, or "Turn off VPN and protection".
+If the app will not open, or that did not help, in a terminal:
+
+    sudo /usr/lib/marzvpn/marzvpn-helper --recover
+
+If the helper itself is damaged, this does the same by hand. It touches only MARZ VPN's own table:
+
+    sudo nft delete table inet marzvpn_ks
+    sudo rm -f /var/lib/marzvpn/killswitch.json
+    sudo systemctl restart marzvpn-helper
+
+Check: `sudo nft list tables` must not show marzvpn_ks.
+Never use `nft flush ruleset`: it removes every firewall rule on the computer, not only ours.
+Removing the app (sudo apt remove marzvpn) also removes the block.

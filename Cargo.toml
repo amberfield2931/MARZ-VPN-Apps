@@ -1,0 +1,25 @@
+[workspace]
+resolver = "2"
+members = ["crates/marz-engine", "crates/marz-helper", "crates/marz-core", "app/src-tauri"]
+
+[workspace.package]
+version = "0.1.4"
+edition = "2021"
+license = "GPL-3.0-or-later"
+rust-version = "1.80"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+debug = false
+strip = true
+lto = "thin"
+codegen-units = 4
+panic = "abort"
+opt-level = "s"
+
+[profile.dev]
+debug = false
+incremental = false

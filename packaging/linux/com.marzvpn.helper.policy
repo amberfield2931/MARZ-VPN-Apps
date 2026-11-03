@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+<policyconfig>
+  <vendor>MARZ VPN</vendor>
+  <vendor_url>https://marzvpn.com</vendor_url>
+  <!-- Emergency recovery only: an administrator's password every time, kept nowhere. No "yes" for anyone,
+       so this can never be a way for an ordinary user to take the protection off. -->
+  <action id="com.marzvpn.helper.recover">
+    <description>Emergency: turn off MARZ VPN and restore the internet</description>
+    <description xml:lang="ru">Аварийно отключить MARZ VPN и восстановить интернет</description>
+    <message>Administrator password is required to turn off MARZ VPN and its protection</message>
+    <message xml:lang="ru">Чтобы отключить MARZ VPN и его защиту, нужен пароль администратора</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/lib/marzvpn/marzvpn-helper</annotate>
+  </action>
+</policyconfig>

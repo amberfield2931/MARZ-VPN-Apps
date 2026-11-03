@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=MARZ VPN (resume protection)
+Comment=Brings the VPN back after a restart if it was left on. Exits at once otherwise.
+Exec=/usr/bin/marzvpn --resume-if-armed
+Icon=marzvpn
+Terminal=false
+NoDisplay=true
+X-GNOME-Autostart-enabled=true
