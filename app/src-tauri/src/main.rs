@@ -227,7 +227,7 @@ fn main() {
     let dir = data_dir();
     let vault = Arc::new(Vault::open(&dir, key_source().as_ref()));
     let api = AppApi::new(api_endpoint(), vault);
-    let controller = Controller::new(api, HelperClient::new(helper_endpoint()), &dir, env!("CARGO_PKG_VERSION"), cfg!(feature = "lab"));
+    let controller = Controller::new(api, HelperClient::new(helper_endpoint()), &dir, env!("MARZ_RELEASE_VERSION"), cfg!(feature = "lab"));
     tauri::Builder::default()
         // A second launch (menu, desktop) brings up the running app instead of starting another one.
         .plugin(tauri_plugin_single_instance::init(|app, _, _| tray::show_window(app)))

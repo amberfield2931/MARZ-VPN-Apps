@@ -39,7 +39,7 @@ const lime = (text, fn, opts) => btn('lime', text, fn, opts);
 const textBtn = (text, fn, opts) => btn('text', text, fn, opts);
 const notice = text => `<div class="notice">${icon('info')}<span>${esc(text)}</span></div>`;
 const open = url => act('open_external', { url });
-const LINKS = { bot: 'https://t.me/MarzReality_bot', mail: 'mailto:support@marzvpn.com?subject=MARZ%20VPN%20App', license: 'https://www.gnu.org/licenses/gpl-3.0.html' };
+const LINKS = { bot: 'https://t.me/MarzReality_bot', mail: 'mailto:support@marzvpn.com?subject=MARZ%20VPN%20App', license: 'https://www.gnu.org/licenses/gpl-3.0.html', source: 'https://github.com/amberfield2931/MARZ-VPN-Apps' };
 const sitePrefix = () => ({ ru: '/ru', fa: '/fa', 'zh-CN': '/zh-cn' }[lang] ?? '');
 const site = path => `https://marzvpn.com${sitePrefix()}${path}`;
 
@@ -413,7 +413,7 @@ function settings() {
       ${setRow('language', t('support_site'), 'marzvpn.com', () => open(site('/')))}<div class="divider"></div>
       ${setRow('doc', t('support_terms'), null, () => open(site('/terms')))}</div>
     <p class="section">${esc(t('settings_about'))}</p><div class="card"><p class="b-l">${esc(t('version', ltr(S.version)))}</p><div class="divider"></div>
-      ${setRow('doc', t('license_title'), t('license_value'), () => open(LINKS.license))}<p class="b-s muted">${esc(t('open_source_note'))}</p><p class="b-s muted">${esc(t('desktop_vpn_stays_on'))}</p></div>
+      ${setRow('doc', t('license_title'), t('license_value'), () => open(LINKS.license))}<div class="divider"></div>${setRow('doc', t('desktop_source_title'), 'GitHub', () => open(LINKS.source))}<p class="b-s muted">${esc(t('open_source_note'))}</p><p class="b-s muted">${esc(t('desktop_vpn_stays_on'))}</p></div>
     ${S.wanted || !S.helper_ok ? `<div class="card">${textBtn(t('desktop_emergency_title'), () => { ui.dialog = 'emergency'; ui.emergencyFailed = false; render(); })}</div>` : ''}`) + dialog + emergencyDialog();
 }
 

@@ -15,6 +15,8 @@ DESKTOP = {
                                 'Компоненты MARZ VPN относятся к разным версиям. Запустите установщик ещё раз: вход и настройки сохранятся.',
                                 'اجزای MARZ VPN از نسخه\u200cهای متفاوتی هستند. نصب\u200cکننده را دوباره اجرا کنید: ورود و تنظیمات شما حفظ می\u200cشود.',
                                 'MARZ VPN 的组件版本不一致。请重新运行安装程序：您的登录状态和设置会保留。'),
+    'open_source_note': ('MARZ VPN uses open-source software under GPL-3.0. The source code of every release is published.', 'MARZ VPN использует открытое ПО по лицензии GPL-3.0. Исходный код каждого выпуска опубликован.', 'MARZ VPN از نرم\u200cافزار متن\u200cباز با مجوز GPL-3.0 استفاده می\u200cکند. کد منبع هر نسخه منتشر شده است.', 'MARZ VPN 使用 GPL-3.0 许可的开源软件。每个版本的源代码均已公开。'),
+    'desktop_source_title': ('Source code', 'Исходный код', 'کد منبع', '源代码'),
     'desktop_storage_unavailable': ('The system keyring is not available, so the app cannot keep you signed in safely. Unlock the keyring or sign in to the desktop session again.',
                                     'Системное хранилище ключей недоступно, поэтому приложение не может безопасно сохранить вход. Разблокируйте хранилище или войдите в сеанс заново.',
                                     'کلیددان سیستم در دسترس نیست و برنامه نمی‌تواند ورود شما را ایمن نگه دارد. کلیددان را باز کنید یا دوباره وارد نشست شوید.',

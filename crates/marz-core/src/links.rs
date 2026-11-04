@@ -5,12 +5,20 @@ pub fn allowed_external(url: &str) -> bool {
         || url == "https://t.me/MarzReality_bot"
         || url.starts_with("https://t.me/MarzReality_bot?start=")
         || url == "https://www.gnu.org/licenses/gpl-3.0.html"
+        || url == "https://github.com/amberfield2931/MARZ-VPN-Apps"
         || url == "mailto:support@marzvpn.com?subject=MARZ%20VPN%20App")
 }
 
 #[cfg(test)]
 mod tests {
     use super::allowed_external;
+
+    #[test]
+    fn the_source_repository_opens_and_nothing_else_on_github() {
+        assert!(allowed_external("https://github.com/amberfield2931/MARZ-VPN-Apps"));
+        assert!(!allowed_external("https://github.com/amberfield2931/MARZ-VPN-Apps/evil"));
+        assert!(!allowed_external("https://github.com/someone/else"));
+    }
 
     #[test]
     fn only_our_destinations_open() {

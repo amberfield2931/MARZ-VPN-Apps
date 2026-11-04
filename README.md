@@ -4,11 +4,11 @@ Official client apps of [MARZ VPN](https://marzvpn.com): downloads are in [Relea
 
 | Platform | Package |
 |---|---|
-| Android | `MARZ-VPN-Android-1.0.0.apk` |
-| Windows 11 x64 | `MARZ-VPN-Setup-0.1.6.exe` |
-| Linux amd64 (.deb) | `MARZ-VPN-0.1.2-4-amd64.deb` |
+| Android | `MARZ-VPN-Android-1.0.1.apk` (Stable) |
+| Windows 11 x64 | `MARZ-VPN-Setup-0.1.6.exe` (Beta) |
+| Linux amd64 (.deb) | `MARZ-VPN-0.1.2-5-amd64.deb` (Stable) |
 
-Beta. Instructions: [Android](https://marzvpn.com/android), [Windows](https://marzvpn.com/windows), [Linux](https://marzvpn.com/linux). Each release lists SHA-256 sums, licenses and the complete corresponding source of its builds.
+Instructions: [Android](https://marzvpn.com/android), [Windows](https://marzvpn.com/windows), [Linux](https://marzvpn.com/linux). Each release lists SHA-256 sums, licenses and the complete corresponding source of its builds.
 
 This repository holds the source of MARZ VPN Desktop (app, helper, packaging). The Android app is at [MARZ-VPN-Android](https://github.com/amberfield2931/MARZ-VPN-Android). The server side of the service is not part of these apps.
 
