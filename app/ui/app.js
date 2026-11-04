@@ -269,7 +269,7 @@ function email() {
   if (st.state === 'enter_code') {
     const left = Math.max(st.sent_at + 60 - Math.floor(Date.now() / 1000), 0);
     return frame(t('login_email'), `<p class="b-l">${esc(t('login_email_code_sent', ltr(st.email)))}</p>
-      <input class="field" id="code" type="password" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="${esc(t('login_email_code_label'))}" value="${esc(ui.code)}">
+      <input class="field" id="code" dir="ltr" type="text" inputmode="numeric" autocomplete="one-time-code" spellcheck="false" placeholder="${esc(t('login_email_code_label'))}" value="${esc(ui.code)}">
       ${st.error ? `<p class="b-m err">${esc(loginError(st.error, true))}</p>` : ''}
       ${btn('primary', t('login_email_verify'), () => { act('email_verify', { code: ui.code }); ui.code = ''; }, { disabled: st.busy })}
       ${left > 0 ? `<p class="b-m muted">${esc(t('login_email_resend_wait', left))}</p>` : textBtn(t('login_email_resend'), () => { ui.code = ''; act('email_resend', { locale: apiLocale() }); }, { disabled: st.busy })}
@@ -277,7 +277,7 @@ function email() {
       <p class="b-m muted">${esc(t('login_email_hint'))}</p>`);
   }
   return frame(t('login_email'), `<p class="b-l">${esc(t('login_email_intro'))}</p>
-    <input class="field" id="email" type="email" autocomplete="email" placeholder="${esc(t('email_label'))}" value="${esc(ui.email)}">
+    <input class="field" id="email" dir="ltr" type="email" autocomplete="email" placeholder="${esc(t('email_label'))}" value="${esc(ui.email)}">
     ${st.state === 'failed' ? `<p class="b-m err">${esc(loginError(st.code))}</p>` : ''}
     ${btn('primary', t('login_email_send_code'), () => { if (ui.email.includes('@') && ui.email.length >= 5) act('email_send', { email: ui.email, locale: apiLocale() }); }, { icon: 'email', disabled: st.state === 'sending' })}
     <p class="b-m muted">${esc(t('login_email_hint'))}</p><p class="b-m muted">${esc(t('login_email_no_trial'))}</p>`);
@@ -370,12 +370,12 @@ function emailLink() {
     })).join('') + (ui.linkError ? `<p class="b-m err">${esc(loginError(ui.linkError))}</p>` : '');
   }
   if (ui.linkSent) {
-    return `<p class="b-m">${esc(t('login_email_code_sent', ltr(ui.linkEmail)))}</p><input class="field" id="linkCode" type="password" inputmode="numeric" maxlength="6" placeholder="${esc(t('login_email_code_label'))}" value="${esc(ui.linkCode)}">
+    return `<p class="b-m">${esc(t('login_email_code_sent', ltr(ui.linkEmail)))}</p><input class="field" id="linkCode" dir="ltr" type="text" inputmode="numeric" autocomplete="one-time-code" spellcheck="false" placeholder="${esc(t('login_email_code_label'))}" value="${esc(ui.linkCode)}">
       ${ui.linkError ? `<p class="b-m err">${esc(loginError(ui.linkError, true))}</p>` : ''}
       ${big(t('email_link_confirm'), async () => { const r = await invoke('email_link_confirm', { email: ui.linkEmail, code: ui.linkCode }); ui.linkCode = ''; if (r.ok) { ui.linkSent = false; ui.linkError = null; } else ui.linkError = r.code; render(); })}
       ${textBtn(t('email_link_cancel'), () => { ui.linkSent = false; ui.linkError = null; ui.linkCode = ''; render(); })}`;
   }
-  return `<p class="b-m muted">${esc(t('email_link_hint'))}</p><input class="field" id="linkEmail" type="email" placeholder="${esc(t('email_label'))}" value="${esc(ui.linkEmail)}">
+  return `<p class="b-m muted">${esc(t('email_link_hint'))}</p><input class="field" id="linkEmail" dir="ltr" type="email" placeholder="${esc(t('email_label'))}" value="${esc(ui.linkEmail)}">
     ${ui.linkError ? `<p class="b-m err">${esc(loginError(ui.linkError))}</p>` : ''}
     ${outlined(t('email_link_add'), async () => { const r = await invoke('email_link_start', { email: ui.linkEmail, locale: apiLocale() }); if (r.ok) { ui.linkSent = true; ui.linkError = null; } else ui.linkError = r.code; render(); })}`;
 }
@@ -452,13 +452,43 @@ async function loadLang(l) {
   document.documentElement.lang = l;
   document.documentElement.dir = l === 'fa' ? 'rtl' : 'ltr';
 }
+// The screens re-render every second. A text field being typed in must survive that: replacing it loses keystrokes,
+// the caret (type="email" has no selectionStart to restore it from) and any IME composition. So everything around
+// the focused field is replaced and the field itself stays. Returns false when the new screen has no such field.
+function keepFocusedField(html) {
+  const field = document.activeElement;
+  if (!field?.matches?.('input.field')) return false;
+  const next = document.createElement('template');
+  next.innerHTML = html;
+  const fresh = next.content.getElementById(field.id);
+  if (!fresh) return false;
+  const chain = (e, top) => { const c = []; for (; e !== top; e = e.parentNode) c.unshift(e); return c; };
+  const have = chain(field, document.getElementById('app')), want = chain(fresh, next.content);
+  if (have.length !== want.length || have.some((e, i) => e.tagName !== want[i].tagName)) return false;
+  have.forEach((e, i) => {
+    const w = want[i];
+    for (const a of [...e.attributes]) if (!w.hasAttribute(a.name)) e.removeAttribute(a.name);
+    for (const a of [...w.attributes]) if (a.name !== 'value' && e.getAttribute(a.name) !== a.value) e.setAttribute(a.name, a.value);
+    if (e === field) return;
+    const stay = have[i + 1], keep = want[i + 1], nodes = [...w.childNodes], at = nodes.indexOf(keep);
+    [...e.childNodes].forEach(n => { if (n !== stay) n.remove(); });
+    stay.before(...nodes.slice(0, at));
+    stay.after(...nodes.slice(at + 1));
+  });
+  // Only the app can make the field differ from its model, for example by clearing it.
+  const model = fresh.getAttribute('value') ?? '';
+  if (field.value.trim() !== model) field.value = model;
+  return true;
+}
 function render() {
   if (!S || !T.__ok) return;
   if (applyPrefs()) return;
   const active = document.activeElement?.id, pos = active ? document.activeElement.selectionStart : null;
   const scrolls = [...document.querySelectorAll('.scroll')].map(e => e.scrollTop);
   handlers.clear();
-  document.getElementById('app').innerHTML = blockedBanner() + SCREENS[screen]();
+  const html = blockedBanner() + SCREENS[screen]();
+  if (keepFocusedField(html)) { [...document.querySelectorAll('.scroll')].forEach((e, i) => { e.scrollTop = scrolls[i] ?? 0; }); return; }
+  document.getElementById('app').innerHTML = html;
   [...document.querySelectorAll('.scroll')].forEach((e, i) => { e.scrollTop = scrolls[i] ?? 0; });
   if (active) { const el = document.getElementById(active); if (el) { el.focus(); if (pos != null) try { el.setSelectionRange(pos, pos); } catch {} } }
 }
