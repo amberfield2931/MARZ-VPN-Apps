@@ -31,6 +31,8 @@ const S = {
   home_lost: { ...signedIn, engine: 'connected', wanted: true, traffic: 'lost', active_route: 'srv-a1', choice: 'a1' },
   home_nonet: { ...signedIn, engine: 'connected', wanted: true, traffic: 'no_network', active_route: 'srv-a1', choice: 'a1' },
   home_nohelper: { ...signedIn, engine: 'unknown', helper_ok: false },
+  home_mismatch: { ...signedIn, helper_mismatch: true },
+  servers_unknown: { ...signedIn, servers: [...servers, { id: 'z1', country: 'ZZ', label: null, kind: 'direct', path: ['ZZ'], source_label: 'Elsewhere', variant: null }, { id: 'z2', country: null, label: 'No country', kind: null, path: [], source_label: 'No country', variant: null }] },
   home_unlimited: { ...signedIn, subscription: sub({ kind: 'unlimited', ends_at: now + 30 * day, quota_bytes: null, used_bytes: null, bonus_bytes: null }) },
   home_trial: { ...signedIn, subscription: sub({ kind: 'trial', ends_at: now + 2 * day, quota_bytes: 3 * 2 ** 30, used_bytes: 2 ** 30, bonus_bytes: null }) },
   home_expired: { ...signedIn, config_ready: false, subscription: { ...sub({ ...basic, ends_at: now - 2 * day }), state: 'expired', can_connect: false } },
@@ -44,7 +46,7 @@ const S = {
   plans_out: {},
   settings: signedIn,
 };
-const SCREEN = { servers: 'servers', telegram: 'telegram', telegram_blocked: 'telegram', telegram_wait: 'telegram', email: 'email', email_code: 'email', plans: 'plans', plans_out: 'plans', settings_blocked: 'settings', settings_ks_off: 'settings', settings: 'settings' };
+const SCREEN = { servers: 'servers', servers_unknown: 'servers', telegram: 'telegram', telegram_blocked: 'telegram', telegram_wait: 'telegram', email: 'email', email_code: 'email', plans: 'plans', plans_out: 'plans', settings_blocked: 'settings', settings_ks_off: 'settings', settings: 'settings' };
 const view = { ...base, ...S[scenario] };
 window.__TAURI_INTERNALS__ = { invoke: async cmd => cmd === 'get_state' ? view : undefined };
 window.__MARZ_START_SCREEN__ = SCREEN[scenario] || null;

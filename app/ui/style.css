@@ -73,7 +73,9 @@ svg.i { width:24px; height:24px; fill:currentColor; flex:none; }
 @media (prefers-reduced-motion: reduce) { .power.busy span { animation:none; opacity:.75; } }
 .row { background:var(--container); border:1px solid var(--outline-variant); border-radius:var(--large); padding:16px 18px; display:flex; align-items:center; gap:14px; cursor:pointer; color:inherit; text-align:start; width:100%; font:inherit; }
 .row.bad { border-color:var(--error); }
-.flag { font-size:28px; line-height:1; font-family:"Noto Color Emoji", "Segoe UI Emoji", sans-serif; }
+.flag { display:inline-flex; flex:none; align-items:center; justify-content:center; width:32px; height:24px; }
+.flag-img { display:block; width:32px; height:23px; border-radius:4px; box-shadow:0 0 0 1px var(--outline-variant); overflow:hidden; }
+.flag-img.neutral { width:24px; height:24px; border-radius:0; box-shadow:none; fill:var(--on-surface-variant); }
 .grow { flex:1; min-width:0; }
 .progress { height:4px; border-radius:var(--small); background:var(--surface-variant); overflow:hidden; }
 .progress > div { height:100%; background:var(--primary); }

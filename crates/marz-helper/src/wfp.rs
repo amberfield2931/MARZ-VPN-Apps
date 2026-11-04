@@ -324,6 +324,25 @@ pub fn present() -> bool {
     ALL_LAYERS.iter().all(|l| matches!(our_filters(&e, *l), Ok(ids) if !ids.is_empty()))
 }
 
+/// Any filter of ours on any layer, even one layer left behind. `present` answers another question (is the block whole).
+/// Err: could not be determined.
+pub fn any_present() -> Result<bool, &'static str> {
+    let e = Engine::open()?;
+    // Listing filters of an unknown provider may be an error, as in `remove`.
+    ensure_provider(&e)?;
+    let mut found = false;
+    for layer in ALL_LAYERS {
+        found |= !our_filters(&e, layer)?.is_empty();
+    }
+    if !found {
+        unsafe {
+            FwpmSubLayerDeleteByKey0(e.0, &SUBLAYER);
+            FwpmProviderDeleteByKey0(e.0, &PROVIDER);
+        }
+    }
+    Ok(found)
+}
+
 /// The tunnel adapter appeared, went away or changed: the filters must name the current one.
 pub fn tun_changed() -> bool {
     tun_luid() != *APPLIED_TUN.lock().unwrap()

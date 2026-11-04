@@ -63,6 +63,9 @@ pub enum Session {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Status {
     pub protocol: u32,
+    /// The helper's own version, to tell a broken mix of old and new parts. Empty: a helper older than this field.
+    #[serde(default)]
+    pub version: String,
     pub state: EngineState,
     /// The user's switch. Stays true across engine exits and network losses; only Stop clears it.
     pub wanted: bool,

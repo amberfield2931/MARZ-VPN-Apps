@@ -1,3 +1,4 @@
+import { flagImage, autoIcon, warningIcon } from './flags.js';
 // MARZ VPN desktop UI: renders the controller's state, screen for screen as Android RC6 (ui/screens/*).
 // All behaviour lives in Rust; here only texts, layout and which action a button calls.
 const invoke = (cmd, args) => window.__TAURI_INTERNALS__.invoke(cmd, args);
@@ -55,11 +56,6 @@ function countryName(code) {
   const c = (code || '').toUpperCase();
   if (SHORT[c]?.[lang]) return SHORT[c][lang];
   try { return new Intl.DisplayNames([lang], { type: 'region' }).of(c) || c; } catch { return c; }
-}
-function flag(code) {
-  const c = (code || '').toUpperCase();
-  if (!/^[A-Z]{2}$/.test(c)) return '🌐';
-  return String.fromCodePoint(0x1F1E6 + c.charCodeAt(0) - 65, 0x1F1E6 + c.charCodeAt(1) - 65);
 }
 const routeTitle = s => s.label ?? (s.country.length === 2 ? (s.variant ? `${countryName(s.country)} ${s.variant}` : countryName(s.country)) : s.id);
 function routeDetail(s, all) {
@@ -135,16 +131,17 @@ function connectSection(size) {
   const canConnect = S.config_ready || (e !== 'disconnected' && e !== 'unknown');
   const busy = e === 'connecting' || e === 'disconnecting' || (e === 'unknown' && S.helper_ok);
   const reconnecting = e === 'connecting' && S.restarts > 0;
-  const [c, onC] = !canConnect || !S.helper_ok ? ['var(--surface-variant)', 'var(--on-surface-variant)']
+  const [c, onC] = !canConnect || !S.helper_ok || (S.helper_mismatch && !S.wanted) ? ['var(--surface-variant)', 'var(--on-surface-variant)']
     : noData ? ['var(--error)', 'var(--on-error)'] : (connected || reconnecting) ? ['var(--connected)', 'var(--on-connected)'] : ['var(--idle)', 'var(--on-idle)'];
   const label = !S.helper_ok ? t('status_disconnected') : reconnecting ? t('desktop_reconnecting') : t({
     unknown: 'status_checking', disconnected: 'status_disconnected', connecting: 'status_connecting', disconnecting: 'status_disconnecting',
     connected: S.traffic === 'lost' ? 'status_no_traffic' : S.traffic === 'no_network' ? 'status_no_network' : 'status_connected',
   }[e]);
   const other = S.session === 'other';
-  const clickable = S.helper_ok && !other && canConnect && e !== 'disconnecting' && e !== 'unknown';
+  const clickable = S.helper_ok && !other && canConnect && !(S.helper_mismatch && !S.wanted) && e !== 'disconnecting' && e !== 'unknown';
   let hint = null, hintErr = false;
   if (!S.helper_ok) { hint = t('desktop_helper_missing'); hintErr = true; }
+  else if (S.helper_mismatch) { hint = t('desktop_helper_mismatch'); hintErr = true; }
   else if (other) { hint = t('desktop_other_user'); hintErr = true; }
   else if (!S.storage_ok) { hint = t('desktop_storage_unavailable'); hintErr = true; }
   else if (S.engine_error === 'killswitch_lost') { hint = t('desktop_protection_lost'); hintErr = true; }
@@ -169,7 +166,7 @@ function serverRow() {
   if (missing) sub = `<p class="b-s err">${esc(t('route_missing_text'))}</p>`;
   else if (connected && active && (!S.choice || active.id !== S.choice)) sub = `<p class="b-s muted">${esc(routeFull(active, S.servers) + (ms ? ' · ' + ms : ''))}</p>`;
   else if (connected && ms) sub = `<p class="b-s muted">${esc(ms)}</p>`;
-  return `<button class="row${missing ? ' bad' : ''}" ${on(() => go('servers'))}><span class="flag">${chosen ? flag(chosen.country) : S.choice ? '⚠️' : '⚡'}</span>
+  return `<button class="row${missing ? ' bad' : ''}" ${on(() => go('servers'))}><span class="flag">${chosen ? flagImage(chosen.country) : S.choice ? warningIcon : autoIcon}</span>
     <span class="grow"><p class="l-m muted">${esc(t('server_label'))}</p><p class="t-m">${esc(main)}</p>${sub}</span>${icon('chevron', true)}</button>`;
 }
 const plans = action => { ui.plansAction = action; act('checkout_reset'); go('plans'); };
@@ -230,11 +227,11 @@ function servers() {
   const connected = S.engine === 'connected', active = activeServer();
   const collator = new Intl.Collator(lang);
   const list = [...S.servers].sort((a, b) => collator.compare(routeTitle(a), routeTitle(b)));
-  const rows = list.map(s => '<div class="divider"></div>' + option(flag(s.country), routeTitle(s), routeDetail(s, S.servers), S.choice === s.id,
+  const rows = list.map(s => '<div class="divider"></div>' + option(flagImage(s.country), routeTitle(s), routeDetail(s, S.servers), S.choice === s.id,
     connected && active?.id === s.id ? (S.live_ms != null ? ltr(t('latency_ms', S.live_ms)) : S.traffic === 'unknown' ? t('latency_measuring') : '—') : null,
     S.from_account ? (S.availability[s.id] ?? 'unknown') : null, () => act('select_server', { id: s.id }))).join('');
   return frame(t('servers_title'), `${textBtn(t('route_check_again'), () => act('route_check_start'), { disabled: !(connected && S.from_account) })}
-    <div class="card">${option('⚡', t('server_auto'), connected && !S.choice && active ? routeFull(active, S.servers) : t('server_auto_hint'), !S.choice, null, null, () => act('select_server', { id: null }))}${rows}</div>
+    <div class="card">${option(autoIcon, t('server_auto'), connected && !S.choice && active ? routeFull(active, S.servers) : t('server_auto_hint'), !S.choice, null, null, () => act('select_server', { id: null }))}${rows}</div>
     ${!S.from_account ? notice(t('connect_need_login')) : !connected ? `<p class="b-s muted">${esc(t('route_check_needs_vpn'))}</p>` : ''}`);
 }
 

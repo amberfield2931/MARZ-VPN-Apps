@@ -14,7 +14,12 @@ use std::path::PathBuf;
 use std::process::{Child, Command};
 use std::sync::Arc;
 use std::time::Duration;
-use windows_service::service::{ServiceControl, ServiceControlAccept, ServiceExitCode, ServiceState, ServiceStatus, ServiceType};
+use std::time::Instant;
+use windows_service::service::{
+    Service, ServiceAccess, ServiceAction, ServiceActionType, ServiceControl, ServiceControlAccept, ServiceDependency, ServiceErrorControl, ServiceExitCode, ServiceFailureActions,
+    ServiceFailureResetPeriod, ServiceInfo, ServiceStartType, ServiceState, ServiceStatus, ServiceType,
+};
+use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
 use windows_service::service_control_handler::{self, ServiceControlHandlerResult};
 use windows_service::{define_windows_service, service_dispatcher};
 use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, LocalFree, ERROR_PIPE_CONNECTED, HANDLE, INVALID_HANDLE_VALUE};
@@ -116,36 +121,53 @@ pub fn ks_needs_refresh() -> bool {
     wfp::tun_changed()
 }
 
+/// The service manager's contract: answer the control at once, report STOP_PENDING while working, and STOPPED before the
+/// process ends. A process that ends without STOPPED counts as a crash, and the recovery actions start it again a second
+/// later. Up to 0.1.5 the helper did exactly that, so `sc stop` brought it back and the installer met a locked file.
 fn service_main(_: Vec<OsString>) {
+    let (stop_tx, stop_rx) = std::sync::mpsc::channel::<()>();
+    let from_control = stop_tx.clone();
     let handler = service_control_handler::register(SERVICE_NAME, move |event| match event {
         ServiceControl::Stop | ServiceControl::Shutdown => {
-            // Service stop is not the user's OFF: the engine goes, the filters stay (they are persistent).
-            if let Some(s) = SHARED.get() {
-                s.shutdown();
-                for _ in 0..60 {
-                    if s.engine_gone() {
-                        break;
-                    }
-                    std::thread::sleep(Duration::from_millis(100));
-                }
-            }
-            std::process::exit(0);
+            let _ = from_control.send(());
+            ServiceControlHandlerResult::NoError
         }
         ServiceControl::Interrogate => ServiceControlHandlerResult::NoError,
         _ => ServiceControlHandlerResult::NotImplemented,
     });
     let Ok(handle) = handler else { return };
-    let _ = handle.set_service_status(ServiceStatus {
-        service_type: ServiceType::OWN_PROCESS,
-        current_state: ServiceState::Running,
-        controls_accepted: ServiceControlAccept::STOP | ServiceControlAccept::SHUTDOWN,
-        exit_code: ServiceExitCode::Win32(0),
-        checkpoint: 0,
-        wait_hint: Duration::default(),
-        process_id: None,
+    let report = |state: ServiceState, accepts: ServiceControlAccept, checkpoint: u32, hint: Duration| {
+        let _ = handle.set_service_status(ServiceStatus {
+            service_type: ServiceType::OWN_PROCESS,
+            current_state: state,
+            controls_accepted: accepts,
+            exit_code: ServiceExitCode::Win32(0),
+            checkpoint,
+            wait_hint: hint,
+            process_id: None,
+        });
+    };
+    report(ServiceState::Running, ServiceControlAccept::STOP | ServiceControlAccept::SHUTDOWN, 0, Duration::default());
+    std::thread::spawn(move || {
+        let (pipe, engine, state_dir) = ARGS.get().unwrap();
+        serve(pipe, engine.clone(), state_dir);
+        let _ = stop_tx.send(());
     });
-    let (pipe, engine, state_dir) = ARGS.get().unwrap();
-    serve(pipe, engine.clone(), state_dir);
+    let _ = stop_rx.recv();
+    report(ServiceState::StopPending, ServiceControlAccept::empty(), 1, Duration::from_secs(10));
+    // Service stop is not the user's OFF: the engine goes, the filters stay (they are persistent).
+    if let Some(s) = SHARED.get() {
+        s.shutdown();
+        for i in 0..60u32 {
+            if s.engine_gone() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+            report(ServiceState::StopPending, ServiceControlAccept::empty(), 2 + i, Duration::from_secs(10));
+        }
+    }
+    report(ServiceState::Stopped, ServiceControlAccept::empty(), 0, Duration::default());
+    std::process::exit(0);
 }
 
 fn wide(s: &str) -> Vec<u16> {
@@ -299,3 +321,305 @@ pub fn request_exit(child: &mut Child) {
 
 /// Wintun routes live on the adapter and disappear with it; nothing global is left to remove.
 pub fn cleanup_network() {}
+
+// ---- installer steps -----------------------------------------------------------------------------------------------
+
+const SERVICE_DISPLAY: &str = "MARZ VPN helper";
+const ERROR_SERVICE_DOES_NOT_EXIST: i32 = 1060;
+const ERROR_SERVICE_MARKED_FOR_DELETE: i32 = 1072;
+const SHARING_VIOLATION: i32 = 32;
+const LOCK_VIOLATION: i32 = 33;
+const STOP_WAIT: Duration = Duration::from_secs(20);
+const DELETE_WAIT: Duration = Duration::from_secs(30);
+const ANSWER_WAIT: Duration = Duration::from_secs(20);
+const PIPE_ANSWER_WAIT: Duration = Duration::from_secs(15);
+
+fn system_tool(name: &str) -> PathBuf {
+    let root = std::env::var_os("SystemRoot").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
+    root.join("System32").join(name)
+}
+
+fn taskkill(args: &[&str]) {
+    let mut cmd = Command::new(system_tool("taskkill.exe"));
+    cmd.args(args).args(["/F"]).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+    prepare_child(&mut cmd);
+    let _ = cmd.status();
+}
+
+/// One request to whatever helper is running, of any version; a hung helper does not hang the installer.
+fn pipe_call(request: &marz_engine::ipc::Request) -> Option<marz_engine::ipc::Response> {
+    let line = serde_json::to_vec(request).ok()?;
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let answer = (|| {
+            let mut f = std::fs::OpenOptions::new().read(true).write(true).open(WINDOWS_PIPE).ok()?;
+            f.write_all(&line).ok()?;
+            f.write_all(b"\n").ok()?;
+            let mut reply = Vec::new();
+            std::io::BufRead::read_until(&mut std::io::BufReader::new(f.take(marz_engine::ipc::MAX_LINE as u64)), b'\n', &mut reply).ok()?;
+            serde_json::from_slice(&reply).ok()
+        })();
+        let _ = tx.send(answer);
+    });
+    rx.recv_timeout(PIPE_ANSWER_WAIT).ok().flatten()
+}
+
+fn helper_status() -> Option<marz_engine::ipc::Status> {
+    match pipe_call(&marz_engine::ipc::Request::Status)? {
+        marz_engine::ipc::Response::Status(s) => Some(s),
+        _ => None,
+    }
+}
+
+struct WinHost {
+    state_dir: PathBuf,
+    log: std::sync::Mutex<Option<std::fs::File>>,
+}
+
+impl WinHost {
+    fn new(state_dir: &std::path::Path) -> Self {
+        let _ = std::fs::create_dir_all(state_dir);
+        let log = std::fs::OpenOptions::new().create(true).append(true).open(state_dir.join("install.log")).ok();
+        WinHost { state_dir: state_dir.to_path_buf(), log: std::sync::Mutex::new(log) }
+    }
+
+    fn manager() -> Option<ServiceManager> {
+        ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT | ServiceManagerAccess::CREATE_SERVICE).ok()
+    }
+
+    fn open(access: ServiceAccess) -> Result<Service, i32> {
+        let manager = Self::manager().ok_or(0)?;
+        manager.open_service(SERVICE_NAME, access).map_err(|e| match e {
+            windows_service::Error::Winapi(io) => io.raw_os_error().unwrap_or(0),
+            _ => 0,
+        })
+    }
+
+    fn all_access() -> ServiceAccess {
+        ServiceAccess::QUERY_STATUS | ServiceAccess::STOP | ServiceAccess::START | ServiceAccess::DELETE | ServiceAccess::CHANGE_CONFIG | ServiceAccess::QUERY_CONFIG
+    }
+
+    fn stopped(service: &Service) -> bool {
+        service.query_status().is_ok_and(|s| s.current_state == ServiceState::Stopped)
+    }
+
+    fn service_info(exe: &std::path::Path) -> ServiceInfo {
+        ServiceInfo {
+            name: SERVICE_NAME.into(),
+            display_name: SERVICE_DISPLAY.into(),
+            service_type: ServiceType::OWN_PROCESS,
+            start_type: ServiceStartType::AutoStart,
+            error_control: ServiceErrorControl::Normal,
+            executable_path: exe.to_path_buf(),
+            launch_arguments: vec!["--service".into()],
+            dependencies: vec![ServiceDependency::Service("BFE".into())],
+            account_name: None,
+            account_password: None,
+        }
+    }
+}
+
+impl crate::install::Host for WinHost {
+    fn log(&self, line: &str) {
+        println!("{line}");
+        if let Some(f) = self.log.lock().unwrap().as_mut() {
+            let _ = writeln!(f, "{line}");
+        }
+    }
+
+    fn close_app(&self) {
+        taskkill(&["/IM", "marzvpn.exe"]);
+    }
+
+    fn helper_off(&self) -> bool {
+        match pipe_call(&marz_engine::ipc::Request::EmergencyOff) {
+            Some(marz_engine::ipc::Response::Status(_)) => true,
+            Some(marz_engine::ipc::Response::Error { code }) => {
+                crate::install::Host::log(self, &format!("the helper answered: {code}"));
+                false
+            }
+            _ => false,
+        }
+    }
+
+    fn service_installed(&self) -> bool {
+        Self::open(ServiceAccess::QUERY_STATUS).is_ok()
+    }
+
+    fn forbid_restart(&self) {
+        let Ok(service) = Self::open(Self::all_access()) else { return };
+        let none = ServiceFailureActions { reset_period: ServiceFailureResetPeriod::After(Duration::from_secs(0)), reboot_msg: None, command: None, actions: Some(vec![]) };
+        if service.update_failure_actions(none).is_err() {
+            crate::install::Host::log(self, "could not clear the recovery actions");
+        }
+    }
+
+    fn stop_service(&self) -> bool {
+        let service = match Self::open(Self::all_access()) {
+            Ok(service) => service,
+            Err(code) => return code == ERROR_SERVICE_DOES_NOT_EXIST,
+        };
+        let begun = Instant::now();
+        let mut pid = None;
+        while begun.elapsed() < STOP_WAIT {
+            match service.query_status() {
+                Ok(s) if s.current_state == ServiceState::Stopped => break,
+                Ok(s) => pid = s.process_id.or(pid),
+                Err(_) => break,
+            }
+            // An old helper ends its process inside this call, so this reports an error. Only the state counts.
+            let _ = service.stop();
+            std::thread::sleep(Duration::from_millis(250));
+        }
+        if !Self::stopped(&service) {
+            crate::install::Host::log(self, "the service did not stop in time: ending its process");
+            if let Some(pid) = service.query_status().ok().and_then(|s| s.process_id).or(pid) {
+                taskkill(&["/PID", &pid.to_string()]);
+            }
+            for _ in 0..40 {
+                if Self::stopped(&service) {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(250));
+            }
+        }
+        // It belongs to the helper's job and ends with it. Only an engine left by a damaged install stays.
+        taskkill(&["/IM", "marzvpn-engine.exe"]);
+        Self::stopped(&service)
+    }
+
+    fn recover_network(&self) -> Result<(), &'static str> {
+        crate::killswitch::recover(&self.state_dir)
+    }
+
+    fn filters_present(&self) -> Result<bool, &'static str> {
+        wfp::any_present()
+    }
+
+    fn file_locked(&self, path: &std::path::Path) -> bool {
+        use std::os::windows::fs::OpenOptionsExt;
+        match std::fs::OpenOptions::new().write(true).share_mode(0).open(path) {
+            Err(e) => matches!(e.raw_os_error(), Some(SHARING_VIOLATION | LOCK_VIOLATION)),
+            Ok(_) => false,
+        }
+    }
+
+    fn delete_service(&self) -> bool {
+        match Self::open(Self::all_access()) {
+            Ok(service) => {
+                if service.delete().is_err() {
+                    return false;
+                }
+            }
+            Err(ERROR_SERVICE_DOES_NOT_EXIST) => return true,
+            Err(_) => return false,
+        }
+        // Deleted means marked: it is gone only when the last handle closes, and a new one cannot be created before that.
+        let begun = Instant::now();
+        while begun.elapsed() < DELETE_WAIT {
+            match Self::open(ServiceAccess::QUERY_STATUS) {
+                Err(ERROR_SERVICE_DOES_NOT_EXIST) => return true,
+                _ => std::thread::sleep(Duration::from_millis(250)),
+            }
+        }
+        false
+    }
+
+    fn create_service(&self, exe: &std::path::Path) -> bool {
+        let info = Self::service_info(exe);
+        let service = match Self::open(Self::all_access()) {
+            Ok(service) => service.change_config(&info).is_ok().then_some(service),
+            Err(_) => {
+                let Some(manager) = Self::manager() else { return false };
+                let begun = Instant::now();
+                loop {
+                    match manager.create_service(&info, Self::all_access()) {
+                        Ok(service) => break Some(service),
+                        Err(windows_service::Error::Winapi(e)) if e.raw_os_error() == Some(ERROR_SERVICE_MARKED_FOR_DELETE) && begun.elapsed() < DELETE_WAIT => {
+                            std::thread::sleep(Duration::from_millis(250));
+                        }
+                        Err(_) => break None,
+                    }
+                }
+            }
+        };
+        let Some(service) = service else { return false };
+        // A real crash still brings the service back: the crash-restart recovery that the block relies on.
+        let restart = |ms| ServiceAction { action_type: ServiceActionType::Restart, delay: Duration::from_millis(ms) };
+        let actions = ServiceFailureActions {
+            reset_period: ServiceFailureResetPeriod::After(Duration::from_secs(60)),
+            reboot_msg: None,
+            command: None,
+            actions: Some(vec![restart(1000), restart(1000), restart(5000)]),
+        };
+        if service.update_failure_actions(actions).is_err() {
+            crate::install::Host::log(self, "could not set the recovery actions");
+        }
+        true
+    }
+
+    fn start_service(&self) -> bool {
+        let Ok(service) = Self::open(Self::all_access()) else { return false };
+        service.start::<OsString>(&[]).is_ok()
+    }
+
+    /// Antivirus scanners open newly written programs for a moment, and a rename fails meanwhile.
+    fn rename(&self, from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()> {
+        let mut last = None;
+        for _ in 0..40 {
+            match std::fs::rename(from, to) {
+                Ok(()) => return Ok(()),
+                Err(e) if matches!(e.raw_os_error(), Some(5 | SHARING_VIOLATION | LOCK_VIOLATION)) => {
+                    last = Some(e);
+                    std::thread::sleep(Duration::from_millis(250));
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        Err(last.unwrap_or_else(|| std::io::Error::other("rename")))
+    }
+
+    fn running_version(&self) -> Option<String> {
+        let begun = Instant::now();
+        while begun.elapsed() < ANSWER_WAIT {
+            if let Some(status) = helper_status() {
+                return Some(status.version);
+            }
+            std::thread::sleep(Duration::from_millis(250));
+        }
+        None
+    }
+}
+
+/// `--upgrade-inspect`, `--install-from-stage DIR`, `--remove-service DIR`. The exit code is the whole answer to the installer.
+pub fn installer_step(args: &Args, state_dir: &std::path::Path) -> i32 {
+    use crate::install::{self, Host};
+    let host = WinHost::new(state_dir);
+    match (args.action, &args.install_dir) {
+        (crate::Action::UpgradeInspect, _) => {
+            // Whatever cannot be established counts as on: a VPN is never turned off on a guess.
+            let running = WinHost::open(ServiceAccess::QUERY_STATUS).is_ok_and(|s| s.query_status().is_ok_and(|q| q.current_state != ServiceState::Stopped));
+            let status = helper_status();
+            let silent_service = running && status.is_none();
+            let asked = status.is_some_and(|s| s.wanted);
+            let saved = state_dir.join("killswitch.json").exists();
+            let filters = wfp::any_present().unwrap_or(true);
+            host.log(&format!("inspect: vpn wanted {asked}, service not answering {silent_service}, saved state {saved}, filters {filters}"));
+            if asked || silent_service || saved || filters { install::EXIT_ACTIVE } else { 0 }
+        }
+        (crate::Action::InstallFromStage, Some(dir)) => {
+            host.log(&format!("install {} into {}", env!("CARGO_PKG_VERSION"), dir.display()));
+            let code = match install::install(&host, dir, env!("CARGO_PKG_VERSION")) {
+                Ok(()) => 0,
+                Err(fail) => fail as i32,
+            };
+            host.log(&format!("result {code}"));
+            code
+        }
+        (crate::Action::RemoveService, Some(dir)) => match install::remove(&host, dir) {
+            Ok(()) => 0,
+            Err(fail) => fail as i32,
+        },
+        _ => 2,
+    }
+}

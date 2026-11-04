@@ -22,6 +22,7 @@
 "desktop_emergency_text": "仅在大按钮未能恢复互联网时使用。VPN 及其保护将被关闭，您的流量将不经 VPN 直接发送。可能需要管理员密码。",
 "desktop_emergency_title": "紧急关闭 VPN 并恢复互联网",
 "desktop_engine_error": "VPN 引擎无法启动（%1$s）。",
+"desktop_helper_mismatch": "MARZ VPN 的组件版本不一致。请重新运行安装程序：您的登录状态和设置会保留。",
 "desktop_helper_missing": "MARZ VPN 系统服务未运行。请重新安装应用或启动“marzvpn-helper”服务。",
 "desktop_ks_locked": "可在 VPN 关闭时更改。",
 "desktop_ks_off_warning": "Kill Switch 已关闭。如果 VPN 断开，您的流量可能不经 VPN 直接发送。",

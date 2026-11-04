@@ -22,6 +22,7 @@
 "desktop_emergency_text": "Only if the big button did not bring your internet back. The VPN and its protection will be turned off, and your traffic will go directly, without the VPN. May ask for an administrator password.",
 "desktop_emergency_title": "Emergency: turn off VPN and restore the internet",
 "desktop_engine_error": "The VPN engine could not start (%1$s).",
+"desktop_helper_mismatch": "Parts of MARZ VPN are from different versions. Run the installer again: your sign-in and settings stay.",
 "desktop_helper_missing": "The MARZ VPN system service is not running. Reinstall the app or start the MARZ VPN helper service.",
 "desktop_ks_locked": "Can be changed while the VPN is off.",
 "desktop_ks_off_warning": "Kill Switch is off. If the VPN drops, your traffic can go directly, without the VPN.",

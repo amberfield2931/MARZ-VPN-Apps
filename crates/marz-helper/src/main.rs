@@ -1,6 +1,8 @@
 //! marzvpn-helper: the only privileged part of MARZ VPN. Runs as a system service, accepts typed
 //! requests from the unprivileged app over a local socket, validates them and supervises one
 //! sing-box process. Nothing from a request reaches a shell or a file; see marz-engine for the shape.
+#[cfg_attr(not(windows), allow(dead_code))]
+mod install;
 mod killswitch;
 mod platform;
 mod supervisor;
@@ -17,6 +19,8 @@ pub struct Args {
     pub engine: Option<PathBuf>,
     pub state_dir: Option<PathBuf>,
     pub action: Action,
+    /// The install folder, for the steps the Windows installer runs.
+    pub install_dir: Option<PathBuf>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -26,10 +30,16 @@ pub enum Action {
     ArmFromState,
     /// By hand or on package removal: remove what MARZ VPN holds in the network, and only that.
     Recover,
+    /// Windows installer: exits with install::EXIT_ACTIVE if the upgrade would turn a running VPN off.
+    UpgradeInspect,
+    /// Windows installer: install or upgrade from the folder's stage. The exit code says what happened.
+    InstallFromStage,
+    /// Windows uninstaller: nothing of MARZ VPN runs or blocks afterwards.
+    RemoveService,
 }
 
 fn parse_args() -> Args {
-    let mut args = Args { endpoint: None, engine: None, state_dir: None, action: Action::Serve };
+    let mut args = Args { endpoint: None, engine: None, state_dir: None, action: Action::Serve, install_dir: None };
     let mut it = std::env::args().skip(1);
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -38,6 +48,15 @@ fn parse_args() -> Args {
             "--state-dir" => args.state_dir = it.next().map(PathBuf::from),
             "--arm-from-state" => args.action = Action::ArmFromState,
             "--recover" => args.action = Action::Recover,
+            "--upgrade-inspect" => args.action = Action::UpgradeInspect,
+            "--install-from-stage" => {
+                args.action = Action::InstallFromStage;
+                args.install_dir = it.next().map(PathBuf::from);
+            }
+            "--remove-service" => {
+                args.action = Action::RemoveService;
+                args.install_dir = it.next().map(PathBuf::from);
+            }
             "--service" => {}
             "--version" => {
                 println!("marzvpn-helper {}", env!("CARGO_PKG_VERSION"));
@@ -139,5 +158,17 @@ fn main() {
                 std::process::exit(1);
             }
         },
+        Action::UpgradeInspect | Action::InstallFromStage | Action::RemoveService => installer_step(&args, &state_dir),
     }
+}
+
+#[cfg(windows)]
+fn installer_step(args: &Args, state_dir: &std::path::Path) {
+    std::process::exit(platform::installer_step(args, state_dir));
+}
+
+#[cfg(not(windows))]
+fn installer_step(_: &Args, _: &std::path::Path) {
+    eprintln!("marzvpn-helper: this step belongs to the Windows installer");
+    std::process::exit(2);
 }

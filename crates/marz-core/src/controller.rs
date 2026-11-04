@@ -11,7 +11,7 @@ use crate::model::{migrate_choice, Account, Server, Subscription};
 use crate::prefs::{Prefs, PrefsFile};
 use crate::tunnel_check::{self, CheckResult};
 use crate::vault;
-use marz_engine::ipc::{EngineState, KillSwitch, Session, Status};
+use marz_engine::ipc::{EngineState, KillSwitch, Session, Status, PROTOCOL};
 use marz_engine::{EngineRequest, AUTO_TAG};
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -69,6 +69,8 @@ pub struct View {
     /// none | mine | other: "other" means another user of this computer turned the VPN on.
     pub session: String,
     pub helper_ok: bool,
+    /// The service is not the version this app shipped with: a damaged install that must not start a tunnel.
+    pub helper_mismatch: bool,
     pub storage_ok: bool,
     /// A config is installed: the button can connect.
     pub config_ready: bool,
@@ -117,6 +119,16 @@ fn unix_now() -> i64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64)
 }
 
+/// A wrong helper is a damaged install. Windows checks the exact version, since its parts always ship together; a Linux
+/// package may carry a helper unchanged from an earlier build, so there only the protocol has to match.
+fn helper_mismatch(s: &Status, app_version: &str) -> bool {
+    versions_differ(s.protocol, &s.version, app_version, cfg!(windows))
+}
+
+fn versions_differ(protocol: u32, helper: &str, app: &str, exact: bool) -> bool {
+    protocol != PROTOCOL || (exact && helper != app)
+}
+
 fn engine_name(s: EngineState) -> &'static str {
     match s {
         EngineState::Stopped => "disconnected",
@@ -149,6 +161,7 @@ impl Controller {
             kill_switch: "off".into(),
             session: "none".into(),
             helper_ok: true,
+            helper_mismatch: false,
             storage_ok,
             config_ready: api.vault().get(vault::ENGINE_CONFIG).is_some(),
             active_route: None,
@@ -272,11 +285,13 @@ impl Controller {
                     Session::Mine => "mine",
                     Session::Other => "other",
                 };
-                if s.needs_request {
+                let mismatch = helper_mismatch(&s, self.read(|v| v.version.clone()).as_str());
+                if s.needs_request && !mismatch {
                     self.resume_tunnel();
                 }
                 let same = self.read(|v| {
                     v.helper_ok
+                        && v.helper_mismatch == mismatch
                         && v.engine == engine
                         && v.wanted == s.wanted
                         && v.active_route == s.active
@@ -291,6 +306,7 @@ impl Controller {
                 let was_connected = self.read(|v| v.engine == "connected");
                 self.change(|v| {
                     v.helper_ok = true;
+                    v.helper_mismatch = mismatch;
                     v.engine = engine.to_string();
                     v.wanted = s.wanted;
                     v.active_route = s.active.clone();
@@ -374,6 +390,9 @@ impl Controller {
                 self.apply_status(r);
             }
             "disconnected" => {
+                if self.read(|v| v.helper_mismatch) {
+                    return;
+                }
                 let Some(request) = self.request_for_choice() else { return };
                 self.change(|v| v.engine_error = None);
                 let kill_switch = self.read(|v| v.prefs.kill_switch);
@@ -924,5 +943,32 @@ fn result_json(r: Result<Value, ApiError>) -> Value {
     match r {
         Ok(v) => json!({"ok": true, "value": v}),
         Err(e) => json!({"ok": false, "code": e.code, "status": e.status}),
+    }
+}
+
+#[cfg(test)]
+mod version_tests {
+    use super::versions_differ;
+    use marz_engine::ipc::{Status, PROTOCOL};
+
+    #[test]
+    fn a_helper_of_another_version_is_a_damaged_install_on_windows() {
+        assert!(!versions_differ(PROTOCOL, "0.1.6", "0.1.6", true));
+        assert!(versions_differ(PROTOCOL, "0.1.5", "0.1.6", true));
+        assert!(versions_differ(PROTOCOL, "", "0.1.6", true), "a helper older than the field");
+        assert!(versions_differ(PROTOCOL + 1, "0.1.6", "0.1.6", true));
+    }
+
+    #[test]
+    fn a_linux_package_may_keep_an_earlier_helper_of_the_same_protocol() {
+        assert!(!versions_differ(PROTOCOL, "", "0.1.6", false));
+        assert!(versions_differ(PROTOCOL - 1, "", "0.1.6", false));
+    }
+
+    #[test]
+    fn the_status_of_an_older_helper_still_parses() {
+        let old = r#"{"protocol":4,"state":"stopped","wanted":false,"selected":null,"active":null,"error":null,"restarts":0,"kill_switch":"off","needs_request":false,"session":"none"}"#;
+        let s: Status = serde_json::from_str(old).unwrap();
+        assert_eq!(s.version, "");
     }
 }

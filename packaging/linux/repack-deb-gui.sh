@@ -1,13 +1,14 @@
 #!/bin/bash
-# Linux 0.1.2-3: 0.1.2-2 with only the app binary rebuilt (text field fix). Helper, engine, service files and maintainer
-# scripts stay byte-identical, and the script refuses otherwise. Usage: repack-deb-gui.sh <fixed app binary>
+# A Linux package from the previous one with only the app binary rebuilt. Helper, engine, service files and maintainer
+# scripts stay byte-identical, and the script refuses otherwise. 0.1.2-3 was the text field fix, 0.1.2-4 the drawn flags.
+# Usage: repack-deb-gui.sh <fixed app binary> <previous revision, 2> <new revision, 3>, for 0.1.2-<revision>
 set -eu
-APP=$(realpath "$1"); ROOT=$(cd "$(dirname "$0")/../.." && pwd); cd "$ROOT"
+APP=$(realpath "$1"); FROM=$2; TO=$3; ROOT=$(cd "$(dirname "$0")/../.." && pwd); cd "$ROOT"
 if strings "$APP" | grep -q 'MARZ_API_URL'; then echo "REFUSED: lab build"; exit 1; fi
-IN=dist/marzvpn_0.1.2-2_amd64.deb; OUT=dist/marzvpn_0.1.2-3_amd64.deb; W=$(mktemp -d); trap 'rm -rf "$W"' EXIT
+IN=dist/marzvpn_0.1.2-${FROM}_amd64.deb; OUT=dist/marzvpn_0.1.2-${TO}_amd64.deb; W=$(mktemp -d); trap 'rm -rf "$W"' EXIT
 dpkg-deb -R "$IN" "$W/n"; dpkg-deb -R "$IN" "$W/o"
 install -m755 "$APP" "$W/n/usr/bin/marzvpn"
-sed -i 's/^Version: 0\.1\.2-2$/Version: 0.1.2-3/' "$W/n/DEBIAN/control"
+sed -i "s/^Version: 0\.1\.2-${FROM}\$/Version: 0.1.2-${TO}/" "$W/n/DEBIAN/control"
 chmod 755 "$W/n"
 dpkg-deb --root-owner-group --build -Zxz "$W/n" "$OUT" | tail -1
 rm -rf "$W/c"; dpkg-deb -R "$OUT" "$W/c"

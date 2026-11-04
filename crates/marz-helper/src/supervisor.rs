@@ -93,6 +93,7 @@ impl Shared {
         let armed = self.ks.is_armed() || self.ks.saved();
         Status {
             protocol: PROTOCOL,
+            version: env!("CARGO_PKG_VERSION").to_string(),
             // Stopped means the block is gone too: until then the internet is not back.
             state: if armed && g.state == EngineState::Stopped { EngineState::Starting } else { g.state },
             wanted: g.wanted.is_some() || armed,

@@ -13,5 +13,25 @@ install -m644 "$TUN/internal/wintun/amd64/wintun.dll" .build/wintun.dll
 cp "$(find target/x86_64-pc-windows-gnu/release/build -path '*webview2-com-sys*/out/x64/WebView2Loader.dll' | head -1)" .build/WebView2Loader.dll
 VERSION=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
 mkdir -p dist
-makensis -V2 -DROOT="$ROOT" -DOUT="$ROOT/dist/MARZ-VPN-$VERSION-windows-x64${OUT_TAG:+-$OUT_TAG}-setup.exe" packaging/windows/installer.nsi
+# One folder with the final names: the installer packs it, the manifest vouches for it, the helper checks it on the
+# target before anything is replaced.
+PAYLOAD=$ROOT/.build/payload; DELETES=$ROOT/.build/payload-delete.nsh
+mkdir -p "$PAYLOAD"
+R=target/x86_64-pc-windows-gnu/release
+while read -r src name; do install -m644 "$src" "$PAYLOAD/$name"; done <<E
+$R/marzvpn.exe marzvpn.exe
+$R/marzvpn-helper.exe marzvpn-helper.exe
+.build/WebView2Loader.dll WebView2Loader.dll
+.build/marzvpn-engine.exe marzvpn-engine.exe
+.build/wintun.dll wintun.dll
+tools/licenses/Wintun-Prebuilt-Binaries-LICENSE.txt wintun-LICENSE.txt
+LICENSE LICENSE.txt
+NOTICE.md NOTICE.md
+RECOVERY-WINDOWS.txt RECOVERY.txt
+tools/windows/marzvpn-wfp-recover.ps1 marzvpn-wfp-recover.ps1
+THIRD-PARTY-NOTICES.txt THIRD-PARTY-NOTICES.txt
+E
+python3 -I packaging/windows/make-manifest.py "$PAYLOAD" "$DELETES"
+python3 -I tests/windows/check-installer-script.py packaging/windows/installer.nsi "$PAYLOAD"
+makensis -V2 -DROOT="$ROOT" -DVERSION="$VERSION" -DPAYLOAD="$PAYLOAD" -DPAYLOAD_DELETE="$DELETES" -DOUT="$ROOT/dist/MARZ-VPN-$VERSION-windows-x64${OUT_TAG:+-$OUT_TAG}-setup.exe" packaging/windows/installer.nsi
 ls -la dist/
