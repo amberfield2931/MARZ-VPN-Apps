@@ -16,11 +16,15 @@ pub struct Prefs {
     pub routes: Option<Vec<Server>>,
     /// Block direct traffic whenever the VPN switch is ON. A file from before this setting reads as on.
     pub kill_switch: bool,
+    /// When the update check last ran, Unix seconds. 0: never.
+    pub update_checked_at: i64,
+    /// A newer published version found by the last check, shown until a check says otherwise.
+    pub update_latest: Option<String>,
 }
 
 impl Default for Prefs {
     fn default() -> Self {
-        Prefs { theme: "system".into(), language: "system".into(), welcome_seen: false, server: None, routes: None, kill_switch: true }
+        Prefs { theme: "system".into(), language: "system".into(), welcome_seen: false, server: None, routes: None, kill_switch: true, update_checked_at: 0, update_latest: None }
     }
 }
 

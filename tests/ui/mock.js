@@ -48,8 +48,13 @@ const S = {
   plans: signedIn,
   plans_out: {},
   settings: signedIn,
+  settings_update_checking: { ...signedIn, update: { state: 'checking' } },
+  settings_update_latest: { ...signedIn, update: { state: 'latest' } },
+  settings_update_available: { ...signedIn, update: { state: 'available', version: '0.1.2-7' } },
+  settings_update_failed: { ...signedIn, update: { state: 'failed' } },
+  home_update: { ...signedIn, engine: 'connected', wanted: true, traffic: 'ok', live_ms: 84, active_route: 'srv-a1', choice: 'a1', kill_switch: 'armed', update: { state: 'available', version: '0.1.2-7' } },
 };
-const SCREEN = { servers: 'servers', servers_unknown: 'servers', telegram: 'telegram', telegram_blocked: 'telegram', telegram_wait: 'telegram', email: 'email', email_code: 'email', plans: 'plans', plans_out: 'plans', settings_blocked: 'settings', settings_ks_off: 'settings', settings: 'settings' };
+const SCREEN = { servers: 'servers', servers_unknown: 'servers', telegram: 'telegram', telegram_blocked: 'telegram', telegram_wait: 'telegram', email: 'email', email_code: 'email', plans: 'plans', plans_out: 'plans', settings_blocked: 'settings', settings_ks_off: 'settings', settings: 'settings', settings_update_checking: 'settings', settings_update_latest: 'settings', settings_update_available: 'settings', settings_update_failed: 'settings' };
 const view = { ...base, ...S[scenario] };
 window.__TAURI_INTERNALS__ = { invoke: async cmd => cmd === 'get_state' ? view : undefined };
 window.__MARZ_START_SCREEN__ = SCREEN[scenario] || null;

@@ -9,7 +9,9 @@ use crate::checkout;
 use crate::helper_client::{HelperClient, HelperError};
 use crate::model::{migrate_choice, Account, Server, Subscription};
 use crate::prefs::{Prefs, PrefsFile};
+use crate::http::Endpoint;
 use crate::tunnel_check::{self, CheckResult};
+use crate::updates;
 use crate::vault;
 use marz_engine::ipc::{EngineState, KillSwitch, Session, Status, PROTOCOL};
 use marz_engine::{EngineRequest, AUTO_TAG};
@@ -23,6 +25,8 @@ use std::time::{Duration, Instant};
 pub const EMAIL_RESEND_SECS: i64 = 60;
 const STATUS_POLL: Duration = Duration::from_millis(1000);
 const SYNC_EVERY: Duration = Duration::from_secs(15 * 60);
+/// Lets the app settle first; the check is not worth competing with the start.
+const UPDATE_CHECK_DELAY: Duration = Duration::from_secs(5);
 const SYNC_MIN_GAP: Duration = Duration::from_secs(60);
 const PAYMENT_WATCH: Duration = Duration::from_secs(20);
 /// Longer than the service needs to end an engine and take its block down (about 6 s, 10 s at worst). A service that
@@ -108,6 +112,30 @@ pub enum QuitStart {
     Busy,
 }
 
+/// The update check as the window shows it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum UpdateUi {
+    Idle,
+    Checking,
+    Latest,
+    Available { version: String },
+    Failed,
+}
+
+/// Where the manifest comes from: one small public file, replaced in tests.
+pub type UpdateSource = Arc<dyn Fn() -> Result<Vec<u8>, ()> + Send + Sync>;
+
+fn production_update_source() -> UpdateSource {
+    Arc::new(|| {
+        #[cfg(feature = "lab")]
+        let endpoint = std::env::var("MARZ_UPDATE_URL").map_err(|_| ()).and_then(|url| Endpoint::parse_with(&url, crate::tls::client_config().map_err(|_| ())?).map_err(|_| ()))?;
+        #[cfg(not(feature = "lab"))]
+        let endpoint = Endpoint::parse(updates::SITE).map_err(|_| ())?;
+        updates::fetch(&endpoint)
+    })
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct View {
     pub signed_in: bool,
@@ -143,6 +171,7 @@ pub struct View {
     pub email: EmailUi,
     pub checkout: CheckoutUi,
     pub quit: QuitUi,
+    pub update: UpdateUi,
     pub prefs: Prefs,
     pub version: String,
     pub is_test_build: bool,
@@ -171,6 +200,8 @@ pub struct Controller {
     /// one already on its way finishes before Quit sends its Stop, and none can arrive after it.
     quit_closed: Mutex<bool>,
     me: Mutex<Weak<Controller>>,
+    update_source: Mutex<UpdateSource>,
+    update_busy: AtomicBool,
 }
 
 fn unix_now() -> i64 {
@@ -208,6 +239,8 @@ impl Controller {
         let storage_ok = api.vault().usable();
         let (account, subscription) = api.offline_snapshot().map_or((None, None), |(a, s)| (Some(a), Some(s)));
         let cached_routes = if signed_in { prefs.routes.clone() } else { None };
+        // A version found earlier stays on show between the daily checks, unless this app is already that version or newer.
+        let update = prefs.update_latest.as_deref().filter(|l| updates::is_newer(l, version) == Some(true)).map_or(UpdateUi::Idle, |l| UpdateUi::Available { version: l.to_string() });
         let view = View {
             signed_in,
             account,
@@ -236,6 +269,7 @@ impl Controller {
             email: EmailUi::EnterEmail,
             checkout: CheckoutUi::Idle,
             quit: QuitUi::Idle,
+            update,
             prefs,
             version: version.to_string(),
             is_test_build,
@@ -255,6 +289,8 @@ impl Controller {
             sync_lock: Mutex::new(()),
             quit_closed: Mutex::new(false),
             me: Mutex::new(Weak::new()),
+            update_source: Mutex::new(production_update_source()),
+            update_busy: AtomicBool::new(false),
         });
         *c.me.lock().unwrap() = Arc::downgrade(&c);
         c
@@ -295,6 +331,59 @@ impl Controller {
         if self.api.pending_telegram_login().is_some() {
             self.telegram_resume();
         }
+        self.background(|c| {
+            std::thread::sleep(UPDATE_CHECK_DELAY);
+            c.auto_update_check(unix_now());
+        });
+    }
+
+    /// The Settings button.
+    pub fn check_updates(self: &Arc<Self>) {
+        self.background(|c| c.run_update_check(true, unix_now()));
+    }
+
+    /// Once at start, at most once in 24 hours. Quiet: a failure shows nothing until the user asks.
+    pub fn auto_update_check(&self, now: i64) {
+        if updates::due(self.read(|v| v.prefs.update_checked_at), now) {
+            self.run_update_check(false, now);
+        }
+    }
+
+    /// Reads the manifest and reports. Touches neither the helper nor the tunnel: with the VPN on the file comes through it, and
+    /// while the Kill Switch blocks the network the check simply fails.
+    fn run_update_check(&self, by_user: bool, now: i64) {
+        if self.update_busy.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        self.change(|v| {
+            v.prefs.update_checked_at = now;
+            if by_user {
+                v.update = UpdateUi::Checking;
+            }
+        });
+        self.save_prefs();
+        let source = self.update_source.lock().unwrap().clone();
+        let (platform, current) = self.read(|v| (v.platform.clone(), v.version.clone()));
+        let found = source().ok().and_then(|body| updates::latest_for(&body, &platform)).and_then(|latest| Some((updates::is_newer(&latest, &current)?, latest)));
+        self.change(|v| match found {
+            Some((true, latest)) => {
+                v.prefs.update_latest = Some(latest.clone());
+                v.update = UpdateUi::Available { version: latest };
+            }
+            Some((false, _)) => {
+                v.prefs.update_latest = None;
+                v.update = UpdateUi::Latest;
+            }
+            None if by_user => v.update = UpdateUi::Failed,
+            None => {}
+        });
+        self.save_prefs();
+        self.update_busy.store(false, Ordering::SeqCst);
+    }
+
+    /// Tests only: the file comes from here instead of the site.
+    pub fn set_update_source(&self, source: UpdateSource) {
+        *self.update_source.lock().unwrap() = source;
     }
 
     fn background(self: &Arc<Self>, f: impl FnOnce(Arc<Controller>) + Send + 'static) {
@@ -1569,5 +1658,131 @@ mod quit_tests {
         let v = c.view();
         assert_eq!((v.engine.as_str(), v.wanted, v.kill_switch.as_str()), ("connected", true, "armed"));
         assert_eq!(stops(&h), 0, "opening the app changes nothing");
+    }
+}
+
+#[cfg(test)]
+mod update_tests {
+    use super::*;
+    use crate::vault::{FixedKey, Vault};
+    use std::sync::atomic::AtomicUsize;
+
+    const NOW: i64 = 1_800_000_000;
+
+    fn manifest(linux: &str, windows: &str) -> Vec<u8> {
+        json!({"schema": 1, "platforms": {"android": {"channel": "stable", "version": "1.0.1", "version_code": 1000092}, "linux": {"channel": "stable", "version": linux}, "windows": {"channel": "beta", "version": windows}}}).to_string().into_bytes()
+    }
+
+    fn make(version: &str) -> (Arc<Controller>, std::path::PathBuf) {
+        static N: AtomicUsize = AtomicUsize::new(0);
+        let dir = std::env::temp_dir().join(format!("marz-update-{}-{}", std::process::id(), N.fetch_add(1, Ordering::SeqCst)));
+        std::fs::create_dir_all(&dir).unwrap();
+        (open(&dir, version), dir)
+    }
+
+    fn open(dir: &std::path::Path, version: &str) -> Arc<Controller> {
+        let vault = Arc::new(Vault::open(dir, &FixedKey([7; 32])));
+        let api = AppApi::new(Endpoint::parse("https://example.invalid").unwrap(), vault);
+        // Nothing listens here: a check that touched the service would fail these tests by waiting, and the tests assert it never does.
+        Controller::new(api, HelperClient::new(dir.join("no-service").to_str().unwrap()), dir, version, true)
+    }
+
+    /// The current version and the published one, on whichever platform runs the test.
+    fn answer(body: Vec<u8>, calls: Arc<AtomicUsize>) -> UpdateSource {
+        Arc::new(move || {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Ok(body.clone())
+        })
+    }
+
+    #[test]
+    fn three_results_of_the_button() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let (c, _d) = make("0.1.2-6");
+        c.set_update_source(answer(manifest("0.1.2-6", "0.1.2-6"), calls.clone()));
+        c.run_update_check(true, NOW);
+        assert_eq!(c.view().update, UpdateUi::Latest);
+        c.set_update_source(answer(manifest("0.1.2-7", "0.1.2-7"), calls.clone()));
+        c.run_update_check(true, NOW);
+        assert_eq!(c.view().update, UpdateUi::Available { version: "0.1.2-7".into() });
+        c.set_update_source(Arc::new(|| Err(())));
+        c.run_update_check(true, NOW);
+        assert_eq!(c.view().update, UpdateUi::Failed);
+        c.set_update_source(answer(b"<html>a captive page</html>".to_vec(), calls));
+        c.run_update_check(true, NOW);
+        assert_eq!(c.view().update, UpdateUi::Failed, "a page that is not the manifest is a failed check");
+    }
+
+    #[test]
+    fn automatic_check_at_most_once_in_24_hours_and_kept_across_restarts() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let (c, d) = make("0.1.2-6");
+        c.set_update_source(answer(manifest("0.1.2-7", "0.1.2-7"), calls.clone()));
+        c.auto_update_check(NOW);
+        c.auto_update_check(NOW + 60);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        drop(c);
+        let again = open(&d, "0.1.2-6");
+        again.set_update_source(answer(manifest("0.1.2-8", "0.1.2-8"), calls.clone()));
+        assert_eq!(again.view().update, UpdateUi::Available { version: "0.1.2-7".into() }, "what was found stays on show");
+        again.auto_update_check(NOW + 3600);
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "a restart within 24 hours does not check");
+        again.auto_update_check(NOW + updates::EVERY_SECS);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(again.view().update, UpdateUi::Available { version: "0.1.2-8".into() });
+    }
+
+    #[test]
+    fn a_failed_automatic_check_stays_quiet_and_counts() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let (c, _d) = make("0.1.2-6");
+        let counted = calls.clone();
+        c.set_update_source(Arc::new(move || {
+            counted.fetch_add(1, Ordering::SeqCst);
+            Err(())
+        }));
+        c.auto_update_check(NOW);
+        assert_eq!(c.view().update, UpdateUi::Idle);
+        c.auto_update_check(NOW + 60);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn after_the_update_the_old_notice_is_gone() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let (c, d) = make("0.1.2-6");
+        c.set_update_source(answer(manifest("0.1.2-7", "0.1.2-7"), calls));
+        c.run_update_check(true, NOW);
+        drop(c);
+        assert_eq!(open(&d, "0.1.2-7").view().update, UpdateUi::Idle);
+        assert_eq!(open(&d, "0.1.2-8").view().update, UpdateUi::Idle);
+    }
+
+    #[test]
+    fn an_older_published_version_is_not_an_update() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let (c, _d) = make("0.1.2-7");
+        c.set_update_source(answer(manifest("0.1.2-6", "0.1.2-6"), calls));
+        c.run_update_check(true, NOW);
+        assert_eq!(c.view().update, UpdateUi::Latest);
+    }
+
+    #[test]
+    fn the_check_leaves_the_vpn_state_alone() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let (c, _d) = make("0.1.2-6");
+        let (engine, wanted, ks, session) = c.read(|v| (v.engine.clone(), v.wanted, v.kill_switch.clone(), v.session.clone()));
+        c.set_update_source(answer(manifest("0.1.2-7", "0.1.2-7"), calls));
+        c.run_update_check(true, NOW);
+        assert_eq!(c.read(|v| (v.engine.clone(), v.wanted, v.kill_switch.clone(), v.session.clone())), (engine, wanted, ks, session));
+    }
+
+    #[test]
+    fn prefs_of_the_published_version_still_read() {
+        let (c, d) = make("0.1.2-6");
+        drop(c);
+        std::fs::write(d.join("prefs.json"), r#"{"theme":"dark","language":"ru","kill_switch":false}"#).unwrap();
+        let v = open(&d, "0.1.2-6").view();
+        assert_eq!((v.prefs.theme.as_str(), v.prefs.kill_switch, v.prefs.update_checked_at, v.prefs.update_latest), ("dark", false, 0, None));
     }
 }

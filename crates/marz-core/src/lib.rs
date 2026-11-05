@@ -12,3 +12,4 @@ pub mod helper_client;
 pub mod prefs;
 pub mod tunnel_check;
 pub mod links;
+pub mod updates;

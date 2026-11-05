@@ -208,13 +208,29 @@ function syncNotice() {
   if (S.sync_error === 'reauth_required') return `<div class="card"><p class="b-l">${esc(t('reauth_text'))}</p>${big(t('login'), () => go('login'))}</div>`;
   return notice(t('sync_error'));
 }
+// The official page of this platform, in the user's language. Nothing is downloaded or installed by the app.
+const updateDownload = () => open(site(S.platform === 'windows' ? '/windows' : '/linux'));
+function updateRow() {
+  const u = S.update ?? { state: 'idle' }, check = () => { act('check_updates'); };
+  if (u.state === 'checking') return `<p class="b-m muted">${esc(t('update_checking'))}</p>${outlined(t('update_check'), check, { disabled: true })}`;
+  if (u.state === 'available') return `<p class="t-m">${esc(t('update_available', ltr(u.version)))}</p>${big(t('update_download'), updateDownload)}${textBtn(t('update_check'), check)}`;
+  if (u.state === 'failed') return `<p class="b-m">${esc(t('update_failed'))}</p>${outlined(t('update_retry'), check)}`;
+  if (u.state === 'latest') return `<p class="b-m">${esc(t('update_latest'))}</p>${textBtn(t('update_check'), check)}`;
+  return outlined(t('update_check'), check);
+}
+function updateBanner() {
+  const u = S.update;
+  if (u?.state !== 'available' || ui.updateLater === u.version) return '';
+  return `<div class="card"><p class="t-m">${esc(t('update_available', ltr(u.version)))}</p>${big(t('update_download'), updateDownload)}${textBtn(t('update_later'), () => { ui.updateLater = u.version; render(); })}</div>`;
+}
+
 function home() {
   const actions = `<button class="iconbtn" aria-label="${esc(t('settings_title'))}" ${on(() => go('settings'))}>${icon('settings')}</button>`;
-  const details = `${syncNotice()}${serverRow()}${subscriptionCard()}${bonusCard()}`;
+  const details = `${updateBanner()}${syncNotice()}${serverRow()}${subscriptionCard()}${bonusCard()}`;
   if (window.innerWidth >= 760) {
     return frame(null, `<div class="two"><div class="scroll"><div class="column center">${connectSection(220)}</div></div><div class="scroll"><div class="column">${details}</div></div></div>`, { back: false, actions, raw: true });
   }
-  return frame(null, `${syncNotice()}${connectSection(196)}${serverRow()}${subscriptionCard()}${bonusCard()}`, { back: false, actions });
+  return frame(null, `${updateBanner()}${syncNotice()}${connectSection(196)}${serverRow()}${subscriptionCard()}${bonusCard()}`, { back: false, actions });
 }
 
 // ---- servers ------------------------------------------------------------------------------------
@@ -424,7 +440,7 @@ function settings() {
       ${setRow('email', t('support_email'), 'support@marzvpn.com', () => open(LINKS.mail))}<div class="divider"></div>
       ${setRow('language', t('support_site'), 'marzvpn.com', () => open(site('/')))}<div class="divider"></div>
       ${setRow('doc', t('support_terms'), null, () => open(site('/terms')))}</div>
-    <p class="section">${esc(t('settings_about'))}</p><div class="card"><p class="b-l">${esc(t('version', ltr(S.version)))}</p><div class="divider"></div>
+    <p class="section">${esc(t('settings_about'))}</p><div class="card"><p class="b-l">${esc(t('version', ltr(S.version)))}</p>${updateRow()}<div class="divider"></div>
       ${setRow('doc', t('license_title'), t('license_value'), () => open(LINKS.license))}<div class="divider"></div>${setRow('doc', t('desktop_source_title'), 'GitHub', () => open(LINKS.source))}<p class="b-s muted">${esc(t('open_source_note'))}</p><p class="b-s muted">${esc(t('desktop_vpn_stays_on'))}</p></div>
     ${S.wanted || !S.helper_ok ? `<div class="card">${textBtn(t('desktop_emergency_title'), () => { ui.dialog = 'emergency'; ui.emergencyFailed = false; render(); })}</div>` : ''}`) + dialog + emergencyDialog();
 }

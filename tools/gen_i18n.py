@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Generate app/ui/i18n/*.json from the strings of public Android RC6 (git tag, never a working tree), plus
-the few desktop-only strings below. Usage: gen_i18n.py <android repo> <out dir>"""
+the desktop-only strings below (the only place to add or change them). Refuses to drop a string the JSON already has.
+Usage: gen_i18n.py <android repo> <out dir> [--allow-remove]"""
 import json, re, subprocess, sys
 import xml.etree.ElementTree as ET
 
@@ -23,15 +24,7 @@ DESKTOP = {
                                     '系统密钥环不可用，应用无法安全地保存登录状态。请解锁密钥环或重新登录桌面会话。'),
     'desktop_reconnecting': ('VPN is on. Reconnecting…', 'VPN включён. Восстанавливаем соединение…', 'VPN روشن است. در حال اتصال دوباره…', 'VPN 已开启，正在重新连接…'),
     'desktop_engine_error': ('The VPN engine could not start (%1$s).', 'Не удалось запустить движок VPN (%1$s).', 'موتور VPN راه‌اندازی نشد (%1$s).', 'VPN 引擎无法启动（%1$s）。'),
-    'desktop_vpn_stays_on': ('Closing this window keeps the app in the tray, and the VPN stays on, also after Quit from the tray menu, until you turn it off with the button.',
-                             'При закрытии окна приложение остаётся в трее, а VPN продолжает работать, в том числе после выхода из меню трея, пока вы не выключите его кнопкой.',
-                             'با بستن این پنجره برنامه در سینی سیستم می‌ماند و VPN، حتی پس از خروج از منوی سینی، روشن می‌ماند تا با دکمه خاموشش کنید.',
-                             '关闭此窗口后应用保留在托盘中，VPN 保持开启，即使从托盘菜单退出也是如此，直到您用按钮关闭。'),
-    # RC6 strings that name a phone, in desktop words.
-    'pay_err_clock': ('Check the date and time on this computer (set them automatically) and try again.',
-                      'Проверьте дату и время на этом компьютере (включите автоматическую установку) и повторите попытку.',
-                      'تاریخ و ساعت این رایانه را بررسی کنید (روی خودکار بگذارید) و دوباره تلاش کنید.',
-                      '请检查这台电脑的日期和时间（设为自动），然后重试。'),
+    'desktop_vpn_stays_on': ('Closing this window keeps the app in the tray, and the VPN stays on. Quit in the tray menu turns the VPN off and closes the app.', 'При закрытии окна приложение остаётся в трее, а VPN продолжает работать. Пункт «Выйти» в меню трея отключает VPN и закрывает приложение.', 'با بستن این پنجره برنامه در سینی سیستم می\u200cماند و VPN روشن می\u200cماند. گزینهٔ خروج در منوی سینی، VPN را خاموش می\u200cکند و برنامه را می\u200cبندد.', '关闭此窗口后应用保留在托盘中，VPN 保持开启。托盘菜单中的“退出”会关闭 VPN 并退出应用。'),
     'language_system': ('System language', 'Язык системы', 'زبان سیستم', '系统语言'),
     'desktop_ks_title': ('Kill Switch', 'Kill Switch', 'Kill Switch', 'Kill Switch'),
     'desktop_ks_on_text': ('If the VPN drops, the internet is blocked until it reconnects. Nothing goes around the VPN, DNS included.',
@@ -77,10 +70,36 @@ DESKTOP = {
                            'Не удалось определить адрес сервера. Обхода VPN нет: проверьте сеть или выключите и снова включите VPN.',
                            'نشانی سرور پیدا نشد. هیچ راهی باز نشد: شبکه را بررسی کنید یا VPN را خاموش و دوباره روشن کنید.',
                            '找不到服务器地址。没有放行任何流量：请检查网络，或关闭后重新开启 VPN。'),
+    'desktop_quit_back': ('Back to the app', 'Вернуться в приложение', 'بازگشت به برنامه', '返回应用'),
+    'desktop_quit_confirm_button': ('Disconnect VPN and Exit', 'Отключить VPN и выйти', 'قطع VPN و خروج', '断开 VPN 并退出'),
+    'desktop_quit_confirm_text': ('Exiting will disconnect the VPN. Your internet traffic will continue directly through your regular connection.', 'При выходе VPN будет отключён, а интернет-трафик продолжит передаваться напрямую через ваше обычное подключение.', 'با خروج، VPN قطع می\u200cشود و ترافیک اینترنت شما مستقیماً از طریق اتصال معمولی\u200cتان ادامه می\u200cیابد.', '退出后 VPN 将断开，您的互联网流量将继续通过常规连接直接传输。'),
+    'desktop_quit_confirm_title': ('Exit MARZ VPN?', 'Выйти из MARZ VPN?', 'از MARZ VPN خارج می\u200cشوید؟', '退出 MARZ VPN？'),
+    'desktop_quit_failed_text': ('The VPN could not be confirmed off, so the app stayed open. The internet may not work. Try again. If that does not help, go back to the app and open Settings, then the emergency option that turns the VPN off and restores the internet.', 'Не удалось подтвердить отключение VPN, поэтому приложение не закрыто. Интернет может не работать. Повторите попытку. Если не поможет, вернитесь в приложение и откройте «Настройки» → «Аварийно отключить VPN и восстановить интернет».', 'خاموش شدن VPN تأیید نشد، بنابراین برنامه باز ماند. ممکن است اینترنت کار نکند. دوباره تلاش کنید. اگر فایده نداشت، به برنامه برگردید و در تنظیمات گزینهٔ اضطراری خاموش کردن VPN و بازگرداندن اینترنت را باز کنید.', '无法确认 VPN 已关闭，因此应用未退出。互联网可能无法使用。请重试。如果仍无效，请返回应用并打开“设置”中用于紧急关闭 VPN 并恢复互联网的选项。'),
+    'desktop_quit_failed_title': ('The VPN is not off', 'VPN не отключён', 'VPN خاموش نشد', 'VPN 未关闭'),
+    'desktop_quit_progress': ('Turning the VPN off…', 'Отключаем VPN…', 'در حال خاموش کردن VPN…', '正在关闭 VPN…'),
+    'desktop_quit_retry': ('Try again', 'Повторить', 'تلاش دوباره', '重试'),
+    # Android strings worded for a computer instead of a phone.
+    'pay_err_clock': ('Check the date and time on this computer (set them automatically) and try again.', 'Проверьте дату и время на этом компьютере (включите автоматическую установку) и повторите попытку.', 'تاریخ و ساعت این رایانه را بررسی کنید (روی خودکار بگذارید) و دوباره تلاش کنید.', '请检查这台电脑的日期和时间（设为自动），然后重试。'),
+    'update_check': ('Check for updates', 'Проверить обновления', 'بررسی به\u200cروزرسانی', '检查更新'),
+    'update_checking': ('Checking…', 'Проверяем…', 'در حال بررسی…', '正在检查…'),
+    'update_latest': ('You have the latest version.', 'Установлена последняя версия.', 'آخرین نسخه نصب است.', '已是最新版本。'),
+    'update_available': ('New version available: %1$s', 'Доступна новая версия: %1$s', 'نسخهٔ جدید در دسترس است: %1$s', '有新版本可用：%1$s'),
+    'update_download': ('Download', 'Скачать', 'دانلود', '下载'),
+    'update_later': ('Later', 'Позже', 'بعداً', '稍后'),
+    'update_failed': ('Could not check for updates.', 'Не удалось проверить обновления.', 'بررسی به\u200cروزرسانی انجام نشد.', '无法检查更新。'),
+    'update_retry': ('Try again', 'Повторить', 'تلاش دوباره', '重试'),
     'desktop_preview_build': ('Test build. Not for distribution.', 'Тестовая сборка. Не для распространения.', 'نسخهٔ آزمایشی. برای توزیع نیست.', '测试版本，请勿分发。'),
 }
 
-repo, out = sys.argv[1], sys.argv[2]
+args = [a for a in sys.argv[1:] if a != '--allow-remove']
+repo, out = args[0], args[1]
+# Strings added by hand to the JSON and not here would vanish on the next run: refuse instead, and say which.
+existing = set()
+for locale in LOCALES:
+    try:
+        existing |= set(json.load(open(f'{out}/{locale}.json', encoding='utf-8')))
+    except FileNotFoundError:
+        pass
 for index, (locale, folder) in enumerate(LOCALES.items()):
     xml = subprocess.run(['git', '-C', repo, 'show', f'{TAG}:app/src/main/res/{folder}/marz_strings.xml'], check=True, capture_output=True).stdout
     table = {}
@@ -91,6 +110,9 @@ for index, (locale, folder) in enumerate(LOCALES.items()):
             table[name[5:]] = text.replace("\\'", "'").replace('\\"', '"').replace('\\n', '\n').replace('\\@', '@')
     for name, values in DESKTOP.items():
         table[name] = values[index]
+    lost = sorted(existing - set(table))
+    if lost and '--allow-remove' not in sys.argv:
+        sys.exit(f'REFUSED: these strings exist in {out} but not in Android {TAG} or DESKTOP; add them to DESKTOP first: {lost}')
     with open(f'{out}/{locale}.json', 'w', encoding='utf-8') as f:
         json.dump(table, f, ensure_ascii=False, indent=0, sort_keys=True)
         f.write('\n')

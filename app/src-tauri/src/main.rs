@@ -217,6 +217,11 @@ fn open_external(url: String) {
     }
 }
 
+#[tauri::command(async)]
+fn check_updates(c: C) {
+    c.check_updates();
+}
+
 /// "Disconnect VPN and Exit" in the question, and "Try again" in the error.
 #[tauri::command(async)]
 fn quit_disconnect(app: tauri::AppHandle, c: C) {
@@ -266,7 +271,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             get_state, toggle, select_server, route_check_start, route_check_stop, telegram_start, telegram_resume, telegram_cancel,
             email_send, email_verify, email_resend, email_reset, logout, mark_welcome_seen, set_theme, set_language, on_visible,
-            checkout_start, checkout_retry, checkout_check, checkout_reset, email_link_start, email_link_confirm, email_unlink, open_external, emergency_off, set_kill_switch, quit_disconnect, quit_cancel
+            checkout_start, checkout_retry, checkout_check, checkout_reset, email_link_start, email_link_confirm, email_unlink, open_external, emergency_off, set_kill_switch, quit_disconnect, quit_cancel, check_updates
         ])
         .run(tauri::generate_context!())
         .expect("window");
