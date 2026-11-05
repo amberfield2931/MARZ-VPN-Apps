@@ -1,6 +1,6 @@
 //! The icon next to the clock: shows the VPN at a glance, reopens the window, connects and disconnects.
 //! Linux trays have no click event through AppIndicator, so everything is in the menu.
-use marz_core::controller::{Controller, View};
+use marz_core::controller::{Controller, QuitStart, View};
 use std::sync::Arc;
 use std::time::Duration;
 use tauri::image::Image;
@@ -21,6 +21,42 @@ pub fn show_window(app: &AppHandle) {
     if let Some(c) = app.try_state::<Arc<Controller>>() {
         c.on_visible(true);
     }
+}
+
+fn show_on_main(app: &AppHandle) {
+    let shown = app.clone();
+    let _ = app.run_on_main_thread(move || show_window(&shown));
+}
+
+/// Quit in the tray. With everything off the app closes at once; otherwise the window opens with the question or the
+/// error, and nothing has been changed. The tray thread never waits on the service.
+fn request_quit(app: &AppHandle) {
+    let Some(c) = app.try_state::<Arc<Controller>>().map(|c| c.inner().clone()) else { return };
+    let app = app.clone();
+    std::thread::spawn(move || match c.begin_quit() {
+        QuitStart::Close => exit(&app),
+        QuitStart::Show => show_on_main(&app),
+        QuitStart::Busy => {}
+    });
+}
+
+/// The user said yes, or "try again": the big button's own Stop, and the app closes only when the service confirms the
+/// network is back. If it cannot, the window shows the error.
+pub fn disconnect_and_exit(app: &AppHandle, c: Arc<Controller>) {
+    if !c.quit_waits_for_user() {
+        return;
+    }
+    let app = app.clone();
+    std::thread::spawn(move || match c.disconnect_for_quit() {
+        Some(Ok(())) => exit(&app),
+        Some(Err(_)) => show_on_main(&app),
+        None => {}
+    });
+}
+
+fn exit(app: &AppHandle) {
+    let closing = app.clone();
+    let _ = app.run_on_main_thread(move || closing.exit(0));
 }
 
 /// What the tray shows for a state. Same meaning as the big button.
@@ -99,8 +135,7 @@ pub fn install(app: &AppHandle, controller: Arc<Controller>) -> tauri::Result<()
                 let c = c.clone();
                 std::thread::spawn(move || c.toggle());
             }
-            // Only the window process ends; a running tunnel stays with the system service.
-            "quit" => app.exit(0),
+            "quit" => request_quit(app),
             _ => {}
         })
         .on_tray_icon_event(|icon, event| {

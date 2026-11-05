@@ -48,7 +48,7 @@ fn key_source() -> Box<dyn KeySource> {
 fn api_endpoint() -> Endpoint {
     #[cfg(feature = "lab")]
     if let Ok(url) = std::env::var("MARZ_API_URL") {
-        let config = marz_core::tls::client_config_with(Default::default()).expect("tls config");
+        let config = marz_core::tls::client_config().expect("tls config");
         return Endpoint::parse_with(&url, config).expect("lab url");
     }
     Endpoint::parse(PRODUCTION_URL).expect("production url")
@@ -217,6 +217,15 @@ fn open_external(url: String) {
     }
 }
 
+/// "Disconnect VPN and Exit" in the question, and "Try again" in the error.
+#[tauri::command(async)]
+fn quit_disconnect(app: tauri::AppHandle, c: C) {
+    tray::disconnect_and_exit(&app, c.inner().clone());
+}
+#[tauri::command]
+fn quit_cancel(c: C) {
+    c.quit_cancel();
+}
 fn main() {
     // Started at login. If the switch was left ON the computer is blocked and only the app can bring the
     // tunnel back, so it starts in the tray; otherwise there is nothing to do, and it leaves no trace.
@@ -242,12 +251,14 @@ fn main() {
             }
             Ok(())
         })
-        // The cross hides the window; the app keeps running in the tray. Quit is in the tray menu.
+        // The cross hides the window; the app and the VPN keep running. Quit in the tray menu is what turns the VPN off.
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
                 let _ = window.hide();
                 if let Some(c) = window.app_handle().try_state::<Arc<Controller>>() {
+                    // The cross on the question means no. It never turns the VPN off.
+                    c.quit_cancel();
                     c.on_visible(false);
                 }
             }
@@ -255,7 +266,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             get_state, toggle, select_server, route_check_start, route_check_stop, telegram_start, telegram_resume, telegram_cancel,
             email_send, email_verify, email_resend, email_reset, logout, mark_welcome_seen, set_theme, set_language, on_visible,
-            checkout_start, checkout_retry, checkout_check, checkout_reset, email_link_start, email_link_confirm, email_unlink, open_external, emergency_off, set_kill_switch
+            checkout_start, checkout_retry, checkout_check, checkout_reset, email_link_start, email_link_confirm, email_unlink, open_external, emergency_off, set_kill_switch, quit_disconnect, quit_cancel
         ])
         .run(tauri::generate_context!())
         .expect("window");

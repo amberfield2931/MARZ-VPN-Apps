@@ -386,7 +386,10 @@ mod tests {
         assert!(!text.contains("\"direct\""), "{text}");
         assert!(!text.contains("\"local\""), "{text}");
         assert!(!text.contains("default_domain_resolver"), "{text}");
-        assert_eq!(c["route"]["default_mark"], ENGINE_MARK);
+        // The mark exists on Linux only; on Windows the WFP filters tell the engine by its program path.
+        if cfg!(target_os = "linux") {
+            assert_eq!(c["route"]["default_mark"], ENGINE_MARK);
+        }
         assert_eq!(c["inbounds"][0]["strict_route"], true);
         let rules = c["route"]["rules"].as_array().unwrap();
         assert_eq!(rules[1]["action"], "hijack-dns");

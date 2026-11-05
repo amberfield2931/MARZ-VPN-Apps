@@ -25,6 +25,12 @@ const STATUS_POLL: Duration = Duration::from_millis(1000);
 const SYNC_EVERY: Duration = Duration::from_secs(15 * 60);
 const SYNC_MIN_GAP: Duration = Duration::from_secs(60);
 const PAYMENT_WATCH: Duration = Duration::from_secs(20);
+/// Longer than the service needs to end an engine and take its block down (about 6 s, 10 s at worst). A service that
+/// has not answered by then is reported to the user; the app does not close on a guess.
+const QUIT_WAIT: Duration = Duration::from_secs(30);
+/// The service restarts itself within about a second. Only a longer silence is a failure.
+const QUIT_HELPER_BACK: Duration = Duration::from_secs(5);
+const QUIT_POLL: Duration = Duration::from_millis(200);
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(tag = "state", rename_all = "snake_case")]
@@ -52,6 +58,54 @@ pub enum CheckoutUi {
     Opened { channel: String, profile_id: String, operation_id: String, order: String, checking: bool },
     Confirmed,
     Failed { problem: String, action: String, source: Option<String>, has_profiles: bool },
+}
+
+/// Quit from the tray. The window shows this; closing the window with its cross has nothing to do with it.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum QuitUi {
+    Idle,
+    /// Asking the service what state things are really in. Nothing to show yet.
+    Checking,
+    /// The VPN is on, connecting, or its block is up: the user decides. Nothing has been changed.
+    Confirm,
+    Disconnecting,
+    /// The VPN could not be confirmed off, so the app stayed open and says so.
+    Failed { code: String },
+}
+
+/// What one answer of the service means for a Quit in progress.
+#[derive(Debug, PartialEq, Eq)]
+enum QuitStep {
+    Done,
+    Wait,
+    Failed(String),
+}
+
+fn quit_step(s: &Status) -> QuitStep {
+    // Someone else's session: not this user's to end, and the service would refuse. It goes on as before.
+    if s.session == Session::Other {
+        return QuitStep::Done;
+    }
+    // The service reports Stopped only after the engine, its routes and DNS guard are gone and the block is down.
+    if s.state == EngineState::Stopped && !s.wanted && s.kill_switch == KillSwitch::Off {
+        return QuitStep::Done;
+    }
+    if s.error.as_deref() == Some("killswitch_remove_failed") {
+        return QuitStep::Failed("killswitch_remove_failed".into());
+    }
+    QuitStep::Wait
+}
+
+/// What the tray does after a Quit was chosen.
+#[derive(Debug, PartialEq, Eq)]
+pub enum QuitStart {
+    /// Nothing of this user's is active, as the service confirmed: the app may close with no question.
+    Close,
+    /// The window has something to show: the question or the error.
+    Show,
+    /// A Quit is already being worked on.
+    Busy,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -88,6 +142,7 @@ pub struct View {
     pub telegram: TelegramUi,
     pub email: EmailUi,
     pub checkout: CheckoutUi,
+    pub quit: QuitUi,
     pub prefs: Prefs,
     pub version: String,
     pub is_test_build: bool,
@@ -112,6 +167,9 @@ pub struct Controller {
     check_epoch: AtomicU64,
     last_sync: Mutex<Option<Instant>>,
     sync_lock: Mutex<()>,
+    /// True from the moment Quit begins: nothing may turn the tunnel on or change it. Held across each such request, so
+    /// one already on its way finishes before Quit sends its Stop, and none can arrive after it.
+    quit_closed: Mutex<bool>,
     me: Mutex<Weak<Controller>>,
 }
 
@@ -177,6 +235,7 @@ impl Controller {
             telegram: TelegramUi::Idle,
             email: EmailUi::EnterEmail,
             checkout: CheckoutUi::Idle,
+            quit: QuitUi::Idle,
             prefs,
             version: version.to_string(),
             is_test_build,
@@ -194,6 +253,7 @@ impl Controller {
             check_epoch: AtomicU64::new(0),
             last_sync: Mutex::new(None),
             sync_lock: Mutex::new(()),
+            quit_closed: Mutex::new(false),
             me: Mutex::new(Weak::new()),
         });
         *c.me.lock().unwrap() = Arc::downgrade(&c);
@@ -350,7 +410,7 @@ impl Controller {
     fn resume_tunnel(&self) {
         let Some(request) = self.request_for_choice() else { return };
         // Only a block left up asks for this, so the tunnel comes back protected whatever the setting says.
-        if let Err(HelperError::Refused(code)) = self.helper.start(request, true) {
+        if let Some(Err(HelperError::Refused(code))) = self.unless_quitting(|| self.helper.start(request, true)) {
             self.change(|v| v.engine_error = Some(code));
         }
     }
@@ -396,11 +456,154 @@ impl Controller {
                 let Some(request) = self.request_for_choice() else { return };
                 self.change(|v| v.engine_error = None);
                 let kill_switch = self.read(|v| v.prefs.kill_switch);
-                let r = self.helper.start(request, kill_switch);
-                self.apply_status(r);
+                if let Some(r) = self.unless_quitting(|| self.helper.start(request, kill_switch)) {
+                    self.apply_status(r);
+                }
             }
             _ => {}
         }
+    }
+
+    /// A request that could turn the tunnel on or restart it. None: Quit has begun, and it was not sent.
+    fn unless_quitting<T>(&self, send: impl FnOnce() -> T) -> Option<T> {
+        let closed = self.quit_closed.lock().unwrap();
+        if *closed {
+            return None;
+        }
+        Some(send())
+    }
+
+    /// The tray's Quit. Asks the service, never the last known view, because a block can be up with no tunnel. Only its
+    /// word that everything is off closes the app; anything else changes nothing and goes to the user.
+    pub fn begin_quit(self: &Arc<Self>) -> QuitStart {
+        {
+            let mut g = self.inner.lock().unwrap();
+            match g.view.quit {
+                QuitUi::Checking | QuitUi::Disconnecting => return QuitStart::Busy,
+                QuitUi::Confirm | QuitUi::Failed { .. } => return QuitStart::Show,
+                QuitUi::Idle => g.view.quit = QuitUi::Checking,
+            }
+        }
+        // Closed until the answer: a Connect already on its way is seen, and none can follow it.
+        *self.quit_closed.lock().unwrap() = true;
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.background(move |c| {
+            let _ = tx.send(c.quit_check(QUIT_HELPER_BACK));
+        });
+        let answer = rx.recv_timeout(QUIT_HELPER_BACK + Duration::from_secs(2)).unwrap_or_else(|_| Err("quit_timeout".to_string()));
+        match answer {
+            Ok(true) => QuitStart::Close,
+            Ok(false) => {
+                // The question is open for as long as the user likes, and the VPN works normally meanwhile.
+                *self.quit_closed.lock().unwrap() = false;
+                self.change(|v| v.quit = QuitUi::Confirm);
+                QuitStart::Show
+            }
+            Err(code) => {
+                self.change(|v| v.quit = QuitUi::Failed { code });
+                QuitStart::Show
+            }
+        }
+    }
+
+    /// Ok(true): all off. Ok(false): something is active. Err: the service cannot tell, and the state stays unknown.
+    fn quit_check(&self, silence: Duration) -> Result<bool, String> {
+        let begun = Instant::now();
+        loop {
+            let answer = self.helper.status();
+            self.apply_status(answer.clone());
+            match answer {
+                Ok(s) => return Ok(quit_step(&s) == QuitStep::Done),
+                Err(HelperError::Refused(code)) => return Err(code),
+                Err(HelperError::Unreachable) if begun.elapsed() >= silence => return Err("helper_unreachable".to_string()),
+                Err(HelperError::Unreachable) => std::thread::sleep(QUIT_POLL),
+            }
+        }
+    }
+
+    /// Quit from the tray: the big button's Stop, then the service's word that the network is back. Ok means the app may
+    /// close. Err leaves it open with the reason in `quit`. None: a Quit is already running, and this one does nothing.
+    /// A hung service cannot hold it past QUIT_WAIT.
+    pub fn disconnect_for_quit(self: &Arc<Self>) -> Option<Result<(), String>> {
+        self.disconnect_for_quit_within(QUIT_WAIT)
+    }
+
+    fn disconnect_for_quit_within(self: &Arc<Self>, limit: Duration) -> Option<Result<(), String>> {
+        {
+            let mut g = self.inner.lock().unwrap();
+            if g.view.quit == QuitUi::Disconnecting {
+                return None;
+            }
+            g.view.quit = QuitUi::Disconnecting;
+        }
+        if let Some(cb) = self.on_change.lock().unwrap().as_ref() {
+            cb();
+        }
+        *self.quit_closed.lock().unwrap() = true;
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.background(move |c| {
+            let _ = tx.send(c.quit_steps(limit));
+        });
+        // A little past the steps' own limit: this one is only for a request to the service that hangs.
+        let result = rx.recv_timeout(limit + Duration::from_secs(2)).unwrap_or_else(|_| Err("quit_timeout".to_string()));
+        if let Err(code) = &result {
+            self.change(|v| v.quit = QuitUi::Failed { code: code.clone() });
+        }
+        Some(result)
+    }
+
+    fn quit_steps(&self, limit: Duration) -> Result<(), String> {
+        let begun = Instant::now();
+        let mut stop_sent = false;
+        let mut silent_since: Option<Instant> = None;
+        while begun.elapsed() < limit {
+            let answer = self.helper.status();
+            self.apply_status(answer.clone());
+            match answer {
+                Ok(s) => {
+                    silent_since = None;
+                    match quit_step(&s) {
+                        QuitStep::Done => return Ok(()),
+                        // An error from before this attempt says nothing yet: Stop clears it and tries again.
+                        QuitStep::Failed(code) if stop_sent => return Err(code),
+                        QuitStep::Wait if stop_sent => {}
+                        QuitStep::Wait | QuitStep::Failed(_) => {
+                            let r = self.helper.stop();
+                            self.apply_status(r.clone());
+                            match r {
+                                Ok(_) => stop_sent = true,
+                                Err(HelperError::Unreachable) => {}
+                                Err(HelperError::Refused(code)) => return Err(code),
+                            }
+                        }
+                    }
+                }
+                Err(HelperError::Unreachable) => {
+                    // It may have restarted and forgotten a Stop: the next answer gets one again.
+                    stop_sent = false;
+                    if silent_since.get_or_insert_with(Instant::now).elapsed() >= QUIT_HELPER_BACK.min(limit / 2) {
+                        return Err("helper_unreachable".to_string());
+                    }
+                }
+                Err(HelperError::Refused(code)) => return Err(code),
+            }
+            std::thread::sleep(QUIT_POLL);
+        }
+        Err("quit_timeout".to_string())
+    }
+
+    /// "Cancel" in the question, or "back to the app" in the error: everything works as before, and the state shown is the real one.
+    pub fn quit_cancel(&self) {
+        if !self.quit_waits_for_user() {
+            return;
+        }
+        *self.quit_closed.lock().unwrap() = false;
+        self.change(|v| v.quit = QuitUi::Idle);
+    }
+
+    /// The question or the error is on screen: only then may a click from the window turn the VPN off.
+    pub fn quit_waits_for_user(&self) -> bool {
+        matches!(self.read(|v| v.quit.clone()), QuitUi::Confirm | QuitUi::Failed { .. })
     }
 
     /// Settings. Refused unless the VPN is fully off, so a running tunnel never changes mode.
@@ -551,8 +754,9 @@ impl Controller {
         }
         // Only a real change restarts a running VPN; the refreshed file is used at the next connect.
         if material_change && old.is_some() && self.read(|v| v.engine == "connected" && v.wanted) {
-            let r = self.helper.replace(request);
-            self.apply_status(r);
+            if let Some(r) = self.unless_quitting(|| self.helper.replace(request)) {
+                self.apply_status(r);
+            }
         }
         Ok(())
     }
@@ -624,8 +828,9 @@ impl Controller {
                         match c.helper.select(&tag) {
                             Ok(s) => c.apply_status(Ok(s)),
                             Err(_) => {
-                                let r = c.helper.replace(request);
-                                c.apply_status(r);
+                                if let Some(r) = c.unless_quitting(|| c.helper.replace(request)) {
+                                    c.apply_status(r);
+                                }
                             }
                         }
                     }
@@ -970,5 +1175,399 @@ mod version_tests {
         let old = r#"{"protocol":4,"state":"stopped","wanted":false,"selected":null,"active":null,"error":null,"restarts":0,"kill_switch":"off","needs_request":false,"session":"none"}"#;
         let s: Status = serde_json::from_str(old).unwrap();
         assert_eq!(s.version, "");
+    }
+}
+
+#[cfg(all(test, unix))]
+mod quit_tests {
+    use super::*;
+    use crate::http::Endpoint;
+    use crate::vault::{FixedKey, Vault};
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::UnixListener;
+
+    /// Stands in for the service: answers by the script, records what it was asked. Only logic: no network, no firewall.
+    struct FakeHelper {
+        socket: std::path::PathBuf,
+        asked: Arc<Mutex<Vec<String>>>,
+    }
+
+    fn status(state: &str, wanted: bool, armed: bool, session: &str, error: Option<&str>, needs_request: bool) -> Value {
+        json!({"protocol": PROTOCOL, "version": "t", "state": state, "wanted": wanted, "selected": null, "active": null, "error": error,
+               "restarts": 0, "kill_switch": if armed {"armed"} else {"off"}, "needs_request": needs_request, "session": session})
+    }
+
+    fn on(session: &str) -> Value {
+        status("running", true, true, session, None, false)
+    }
+
+    fn off() -> Value {
+        status("stopped", false, false, "none", None, false)
+    }
+
+    /// `answer` gets the command and how many Stops came so far. None: the request hangs with no reply.
+    fn fake(dir: &std::path::Path, answer: impl Fn(&str, usize) -> Option<Value> + Send + 'static) -> FakeHelper {
+        let socket = dir.join("h.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        let log = asked.clone();
+        std::thread::spawn(move || {
+            let mut stops = 0;
+            for stream in listener.incoming().flatten() {
+                let mut line = String::new();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                if reader.read_line(&mut line).is_err() {
+                    continue;
+                }
+                let cmd = serde_json::from_str::<Value>(&line).ok().and_then(|v| v["cmd"].as_str().map(str::to_string)).unwrap_or_default();
+                if cmd == "stop" {
+                    stops += 1;
+                }
+                log.lock().unwrap().push(cmd.clone());
+                match answer(&cmd, stops) {
+                    Some(v) => {
+                        let mut reply = v;
+                        if reply.get("code").is_some() {
+                            reply["result"] = json!("error");
+                        } else {
+                            reply["result"] = json!("status");
+                        }
+                        let _ = writeln!(&stream, "{reply}");
+                    }
+                    None => std::mem::forget(stream),
+                }
+            }
+        });
+        FakeHelper { socket, asked }
+    }
+
+    fn controller(dir: &std::path::Path, socket: &std::path::Path) -> Arc<Controller> {
+        let vault = Arc::new(Vault::open(dir, &FixedKey([9; 32])));
+        let api = AppApi::new(Endpoint::parse("https://127.0.0.1:1").unwrap(), vault);
+        Controller::new(api, HelperClient::new(socket.to_str().unwrap()), dir, "t", true)
+    }
+
+    fn temp() -> std::path::PathBuf {
+        static N: AtomicU64 = AtomicU64::new(0);
+        let d = std::env::temp_dir().join(format!("marz-quit-{}-{}", std::process::id(), N.fetch_add(1, Ordering::SeqCst)));
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn stops(h: &FakeHelper) -> usize {
+        h.asked.lock().unwrap().iter().filter(|c| *c == "stop").count()
+    }
+
+    #[test]
+    fn vpn_on_asks_first_and_changes_nothing() {
+        let d = temp();
+        let h = fake(&d, |_, _| Some(on("mine")));
+        let c = controller(&d, &h.socket);
+        assert_eq!(c.begin_quit(), QuitStart::Show);
+        assert_eq!(c.view().quit, QuitUi::Confirm);
+        assert_eq!(stops(&h), 0);
+        assert_eq!(c.unless_quitting(|| 1), Some(1), "the VPN goes on working while the question is open");
+    }
+
+    #[test]
+    fn vpn_connecting_asks_first() {
+        let d = temp();
+        let h = fake(&d, |_, _| Some(status("starting", true, false, "mine", None, false)));
+        let c = controller(&d, &h.socket);
+        assert_eq!(c.begin_quit(), QuitStart::Show);
+        assert_eq!(c.view().quit, QuitUi::Confirm);
+    }
+
+    #[test]
+    fn a_block_left_with_no_tunnel_is_not_closed_past() {
+        let d = temp();
+        // The view still says off, as before the first answer: only the service's word counts.
+        let h = fake(&d, |_, _| Some(status("starting", true, true, "mine", None, true)));
+        let c = controller(&d, &h.socket);
+        assert_eq!(c.begin_quit(), QuitStart::Show);
+        assert_eq!(c.view().quit, QuitUi::Confirm);
+    }
+
+    #[test]
+    fn a_block_that_failed_to_come_down_asks_again() {
+        let d = temp();
+        let h = fake(&d, |_, _| Some(status("starting", true, true, "mine", Some("killswitch_remove_failed"), false)));
+        let c = controller(&d, &h.socket);
+        assert_eq!(c.begin_quit(), QuitStart::Show);
+        assert_eq!(c.view().quit, QuitUi::Confirm);
+    }
+
+    #[test]
+    fn vpn_off_closes_with_no_question() {
+        let d = temp();
+        let h = fake(&d, |_, _| Some(off()));
+        let c = controller(&d, &h.socket);
+        assert_eq!(c.begin_quit(), QuitStart::Close);
+        assert_eq!(stops(&h), 0);
+        assert_eq!(c.unless_quitting(|| 1), None, "nothing can start on the way out");
+    }
+
+    #[test]
+    fn another_users_session_closes_with_no_question() {
+        let d = temp();
+        let h = fake(&d, |_, _| Some(on("other")));
+        let c = controller(&d, &h.socket);
+        assert_eq!(c.begin_quit(), QuitStart::Close);
+        assert_eq!(stops(&h), 0);
+    }
+
+    #[test]
+    fn cancel_touches_nothing_and_the_next_quit_asks_again() {
+        let d = temp();
+        let h = fake(&d, |_, _| Some(on("mine")));
+        let c = controller(&d, &h.socket);
+        c.begin_quit();
+        c.quit_cancel();
+        assert_eq!(c.view().quit, QuitUi::Idle);
+        assert_eq!(stops(&h), 0);
+        assert_eq!(c.view().engine, "connected");
+        assert_eq!(c.begin_quit(), QuitStart::Show);
+        assert_eq!(c.view().quit, QuitUi::Confirm);
+    }
+
+    #[test]
+    fn a_second_quit_while_the_question_is_open_only_shows_it() {
+        let d = temp();
+        let h = fake(&d, |_, _| Some(on("mine")));
+        let c = controller(&d, &h.socket);
+        c.begin_quit();
+        assert_eq!(c.begin_quit(), QuitStart::Show);
+        assert_eq!(stops(&h), 0);
+    }
+
+    #[test]
+    fn yes_stops_the_vpn_and_closes_only_when_confirmed() {
+        let d = temp();
+        let h = fake(&d, |_, stops| Some(if stops == 0 { on("mine") } else { off() }));
+        let c = controller(&d, &h.socket);
+        c.begin_quit();
+        assert!(c.quit_waits_for_user());
+        assert_eq!(c.disconnect_for_quit(), Some(Ok(())));
+        assert_eq!(stops(&h), 1);
+    }
+
+    #[test]
+    fn failure_after_yes_shows_the_error_and_retry_finishes() {
+        let d = temp();
+        let h = fake(&d, |_, stops| {
+            Some(match stops {
+                0 => on("mine"),
+                1 => status("starting", true, true, "mine", Some("killswitch_remove_failed"), false),
+                _ => off(),
+            })
+        });
+        let c = controller(&d, &h.socket);
+        c.begin_quit();
+        assert_eq!(c.disconnect_for_quit(), Some(Err("killswitch_remove_failed".into())));
+        assert_eq!(c.view().quit, QuitUi::Failed { code: "killswitch_remove_failed".into() });
+        assert!(c.quit_waits_for_user());
+        assert_eq!(c.disconnect_for_quit(), Some(Ok(())));
+        assert_eq!(stops(&h), 2);
+    }
+
+    #[test]
+    fn a_service_that_cannot_answer_is_an_error_not_a_close() {
+        let d = temp();
+        let c = controller(&d, &d.join("nothing.sock"));
+        assert_eq!(c.begin_quit(), QuitStart::Show);
+        assert_eq!(c.view().quit, QuitUi::Failed { code: "helper_unreachable".into() });
+    }
+
+    #[test]
+    fn quit_during_the_error_only_shows_it_and_never_closes() {
+        let d = temp();
+        let c = controller(&d, &d.join("nothing.sock"));
+        c.begin_quit();
+        assert_eq!(c.begin_quit(), QuitStart::Show);
+        assert_eq!(c.view().quit, QuitUi::Failed { code: "helper_unreachable".into() });
+    }
+
+    #[test]
+    fn a_click_with_no_question_on_screen_is_not_allowed() {
+        let d = temp();
+        let h = fake(&d, |_, _| Some(on("mine")));
+        let c = controller(&d, &h.socket);
+        assert!(!c.quit_waits_for_user());
+    }
+
+    #[test]
+    fn vpn_on_quit_stops_it_and_waits_for_the_network() {
+        let d = temp();
+        // Stop is taken at once, and the service needs a few more answers until the block is down.
+        let seen = Arc::new(AtomicU64::new(0));
+        let n = seen.clone();
+        let h = fake(&d, move |_, stops| {
+            if stops == 0 {
+                return Some(on("mine"));
+            }
+            match n.fetch_add(1, Ordering::SeqCst) {
+                0 | 1 => Some(status("stopping", true, true, "mine", None, false)),
+                _ => Some(off()),
+            }
+        });
+        let c = controller(&d, &h.socket);
+        assert_eq!(c.disconnect_for_quit(), Some(Ok(())));
+        assert_eq!(stops(&h), 1, "the big button's one Stop");
+        assert!(seen.load(Ordering::SeqCst) >= 3, "did not leave before the service said Stopped");
+    }
+
+    #[test]
+    fn vpn_off_quit_closes_without_a_stop() {
+        let d = temp();
+        let h = fake(&d, |_, _| Some(off()));
+        let c = controller(&d, &h.socket);
+        assert_eq!(c.disconnect_for_quit(), Some(Ok(())));
+        assert_eq!(stops(&h), 0);
+    }
+
+    #[test]
+    fn another_users_session_is_left_alone() {
+        let d = temp();
+        let h = fake(&d, |_, _| Some(on("other")));
+        let c = controller(&d, &h.socket);
+        assert_eq!(c.disconnect_for_quit(), Some(Ok(())));
+        assert_eq!(stops(&h), 0);
+    }
+
+    #[test]
+    fn block_that_cannot_be_removed_keeps_the_app_open() {
+        let d = temp();
+        let h = fake(&d, |_, stops| Some(if stops == 0 { on("mine") } else { status("starting", true, true, "mine", Some("killswitch_remove_failed"), false) }));
+        let c = controller(&d, &h.socket);
+        assert_eq!(c.disconnect_for_quit(), Some(Err("killswitch_remove_failed".into())));
+        assert_eq!(c.view().quit, QuitUi::Failed { code: "killswitch_remove_failed".into() });
+        assert!(c.quit_waits_for_user());
+    }
+
+    #[test]
+    fn retry_after_a_failed_removal_sends_stop_again() {
+        let d = temp();
+        // The old error stays in the status until a new Stop clears it, and this time the removal works.
+        let h = fake(&d, |_, stops| Some(if stops == 0 { status("starting", true, true, "mine", Some("killswitch_remove_failed"), false) } else { off() }));
+        let c = controller(&d, &h.socket);
+        assert_eq!(c.disconnect_for_quit(), Some(Ok(())));
+        assert_eq!(stops(&h), 1);
+    }
+
+    #[test]
+    fn refused_stop_keeps_the_app_open() {
+        let d = temp();
+        let h = fake(&d, |cmd, _| Some(if cmd == "stop" { json!({"code": "engine_refused"}) } else { on("mine") }));
+        let c = controller(&d, &h.socket);
+        assert_eq!(c.disconnect_for_quit(), Some(Err("engine_refused".into())));
+    }
+
+    #[test]
+    fn missing_service_keeps_the_app_open_and_a_retry_works_when_it_returns() {
+        let d = temp();
+        let socket = d.join("h.sock");
+        let c = controller(&d, &socket);
+        assert_eq!(c.disconnect_for_quit_within(Duration::from_millis(1200)), Some(Err("helper_unreachable".into())));
+        assert!(c.quit_waits_for_user());
+        let h = fake(&d, |_, _| Some(off()));
+        assert_eq!(c.disconnect_for_quit(), Some(Ok(())));
+        assert_eq!(stops(&h), 0);
+    }
+
+    #[test]
+    fn service_that_returns_mid_quit_gets_the_stop_again() {
+        let d = temp();
+        let socket = d.join("h.sock");
+        let c = controller(&d, &socket);
+        let waiter = c.clone();
+        let quit = std::thread::spawn(move || waiter.disconnect_for_quit());
+        std::thread::sleep(Duration::from_millis(600));
+        let h = fake(&d, |_, stops| Some(if stops == 0 { on("mine") } else { off() }));
+        assert_eq!(quit.join().unwrap(), Some(Ok(())));
+        assert_eq!(stops(&h), 1);
+    }
+
+    #[test]
+    fn hung_service_cannot_hold_the_app_past_the_limit() {
+        let d = temp();
+        let h = fake(&d, |_, _| None);
+        let c = controller(&d, &h.socket);
+        let begun = Instant::now();
+        assert_eq!(c.disconnect_for_quit_within(Duration::from_millis(800)), Some(Err("quit_timeout".into())));
+        assert!(begun.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn service_that_never_finishes_is_reported() {
+        let d = temp();
+        let h = fake(&d, |_, _| Some(on("mine")));
+        let c = controller(&d, &h.socket);
+        assert_eq!(c.disconnect_for_quit_within(Duration::from_millis(800)), Some(Err("quit_timeout".into())));
+        assert_eq!(stops(&h), 1, "one Stop, then waiting");
+    }
+
+    #[test]
+    fn a_second_quit_during_the_first_does_nothing() {
+        let d = temp();
+        let h = fake(&d, |_, _| Some(on("mine")));
+        let c = controller(&d, &h.socket);
+        let first = c.clone();
+        let running = std::thread::spawn(move || first.disconnect_for_quit_within(Duration::from_millis(1000)));
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(c.disconnect_for_quit(), None);
+        assert!(running.join().unwrap().is_some());
+        assert_eq!(stops(&h), 1);
+    }
+
+    #[test]
+    fn nothing_can_turn_the_tunnel_back_on_during_quit() {
+        let d = temp();
+        // Status keeps asking for credentials, as a helper restarted with the block up does.
+        let h = fake(&d, |_, stops| Some(if stops == 0 { status("starting", true, true, "mine", None, true) } else { status("stopping", true, true, "mine", None, true) }));
+        let c = controller(&d, &h.socket);
+        let request = EngineRequest { routes: vec![], selected: AUTO_TAG.to_string() };
+        assert!(c.store_request(Some(&request)));
+        let _ = c.disconnect_for_quit_within(Duration::from_millis(600));
+        c.poll_helper();
+        c.change(|v| v.engine = "disconnected".into());
+        c.toggle();
+        assert_eq!(h.asked.lock().unwrap().iter().filter(|x| *x == "start" || *x == "replace").count(), 0);
+    }
+
+    #[test]
+    fn back_to_the_app_opens_the_way_again() {
+        let d = temp();
+        let h = fake(&d, |_, stops| Some(if stops == 0 { on("mine") } else { status("starting", true, true, "mine", Some("killswitch_remove_failed"), false) }));
+        let c = controller(&d, &h.socket);
+        let _ = c.disconnect_for_quit();
+        c.quit_cancel();
+        assert_eq!(c.view().quit, QuitUi::Idle);
+        assert!(!c.quit_waits_for_user());
+        assert_eq!(c.unless_quitting(|| 1), Some(1));
+    }
+
+    #[test]
+    fn cancel_cannot_interrupt_a_quit_in_progress() {
+        let d = temp();
+        let h = fake(&d, |_, _| Some(on("mine")));
+        let c = controller(&d, &h.socket);
+        let first = c.clone();
+        let running = std::thread::spawn(move || first.disconnect_for_quit_within(Duration::from_millis(800)));
+        std::thread::sleep(Duration::from_millis(200));
+        c.quit_cancel();
+        assert_eq!(c.view().quit, QuitUi::Disconnecting);
+        assert_eq!(c.unless_quitting(|| 1), None);
+        let _ = running.join();
+    }
+
+    #[test]
+    fn a_new_start_of_the_app_reads_the_real_state() {
+        let d = temp();
+        let h = fake(&d, |_, _| Some(on("mine")));
+        let c = controller(&d, &h.socket);
+        c.poll_helper();
+        let v = c.view();
+        assert_eq!((v.engine.as_str(), v.wanted, v.kill_switch.as_str()), ("connected", true, "armed"));
+        assert_eq!(stops(&h), 0, "opening the app changes nothing");
     }
 }

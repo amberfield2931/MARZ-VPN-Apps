@@ -13,7 +13,7 @@ const sub = e => ({ state: 'active', entitlement: e, can_connect: true, effectiv
 const signedIn = { signed_in: true, account: { id: 'acc', identities: [{ kind: 'telegram', display: '@te***', id: 'i1' }], vpn_sources: [['vpn_1', 'bot']] }, subscription: sub(basic), config_ready: true, servers, from_account: true };
 const base = { signed_in: false, account: null, subscription: null, engine: 'disconnected', wanted: false, engine_error: null, restarts: 0, helper_ok: true, storage_ok: true, config_ready: false,
   active_route: null, traffic: 'unknown', live_ms: null, servers: [], from_account: false, choice: null, route_missing: false, availability: {}, sync_error: null, syncing: false,
-  telegram: { state: 'idle' }, email: { state: 'enter_email' }, checkout: { state: 'idle' }, prefs: { theme: q.get('theme') || 'light', language, welcome_seen: true, server: null, routes: null }, version: '0.1.0', is_test_build: false };
+  telegram: { state: 'idle' }, email: { state: 'enter_email' }, checkout: { state: 'idle' }, prefs: { theme: q.get('theme') || 'light', language, welcome_seen: true, server: null, routes: null }, version: '0.1.2-5', is_test_build: false };
 const S = {
   welcome: { prefs: { ...base.prefs, welcome_seen: false } },
   home_out: {},
@@ -31,6 +31,9 @@ const S = {
   home_lost: { ...signedIn, engine: 'connected', wanted: true, traffic: 'lost', active_route: 'srv-a1', choice: 'a1' },
   home_nonet: { ...signedIn, engine: 'connected', wanted: true, traffic: 'no_network', active_route: 'srv-a1', choice: 'a1' },
   home_nohelper: { ...signedIn, engine: 'unknown', helper_ok: false },
+  quit_confirm: { ...signedIn, engine: 'connected', wanted: true, traffic: 'ok', live_ms: 84, active_route: 'srv-a1', choice: 'a1', quit: { state: 'confirm' } },
+  quit_progress: { ...signedIn, engine: 'connected', wanted: true, traffic: 'ok', live_ms: 84, active_route: 'srv-a1', choice: 'a1', quit: { state: 'disconnecting' } },
+  quit_failed: { ...signedIn, engine: 'connecting', wanted: true, kill_switch: 'armed', restarts: 1, quit: { state: 'failed', code: 'killswitch_remove_failed' } },
   home_mismatch: { ...signedIn, helper_mismatch: true },
   servers_unknown: { ...signedIn, servers: [...servers, { id: 'z1', country: 'ZZ', label: null, kind: 'direct', path: ['ZZ'], source_label: 'Elsewhere', variant: null }, { id: 'z2', country: null, label: 'No country', kind: null, path: [], source_label: 'No country', variant: null }] },
   home_unlimited: { ...signedIn, subscription: sub({ kind: 'unlimited', ends_at: now + 30 * day, quota_bytes: null, used_bytes: null, bonus_bytes: null }) },

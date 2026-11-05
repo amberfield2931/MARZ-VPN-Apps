@@ -384,6 +384,18 @@ function killSwitchRow() {
     <p class="b-s ${on_ ? 'muted' : 'err'}">${esc(t(on_ ? 'desktop_ks_on_text' : 'desktop_ks_off_warning'))}</p>
     ${free ? '' : `<p class="b-s muted">${esc(t('desktop_ks_locked'))}</p>`}`;
 }
+// Above every screen: Quit can come from the tray whatever is open.
+function quitDialog() {
+  const q = S.quit?.state;
+  if (q === 'confirm') return `<div class="dialog-back"><div class="dialog" role="alertdialog"><p class="t-l">${esc(t('desktop_quit_confirm_title'))}</p><p class="b-m">${esc(t('desktop_quit_confirm_text'))}</p>
+    ${outlined(t('cancel'), () => act('quit_cancel'))}
+    ${big(t('desktop_quit_confirm_button'), () => act('quit_disconnect'))}</div></div>`;
+  if (q === 'disconnecting') return `<div class="dialog-back"><div class="dialog"><p class="t-m" role="status">${esc(t('desktop_quit_progress'))}</p></div></div>`;
+  if (q !== 'failed') return '';
+  return `<div class="dialog-back"><div class="dialog" role="alertdialog"><p class="t-l">${esc(t('desktop_quit_failed_title'))}</p><p class="b-m">${esc(t('desktop_quit_failed_text'))}</p><p class="b-s muted" dir="ltr">${esc(S.quit.code)}</p>
+    ${outlined(t('desktop_quit_retry'), () => act('quit_disconnect'))}
+    ${outlined(t('desktop_quit_back'), () => act('quit_cancel'))}</div></div>`;
+}
 function emergencyDialog() {
   if (ui.dialog !== 'emergency') return '';
   return `<div class="dialog-back"><div class="dialog"><p class="t-l">${esc(t('desktop_emergency_title'))}</p><p class="b-m">${esc(t('desktop_emergency_text'))}</p>
@@ -477,13 +489,24 @@ function keepFocusedField(html) {
   if (field.value.trim() !== model) field.value = model;
   return true;
 }
+// A press and its release must land on the same element, or the browser sends no click. So the page is not rebuilt during a press,
+// and not at all when nothing changed. Before this, the poll lost about one click in five.
+let pressedAt = 0, shown = null;
+const PRESS_LIMIT_MS = 2000;
+window.addEventListener('pointerdown', () => { pressedAt = Date.now(); }, true);
+const released = () => { if (pressedAt) { pressedAt = 0; setTimeout(render, 0); } };
+window.addEventListener('pointerup', released, true);
+window.addEventListener('pointercancel', released, true);
 function render() {
   if (!S || !T.__ok) return;
+  if (pressedAt && Date.now() - pressedAt < PRESS_LIMIT_MS) return;
   if (applyPrefs()) return;
   const active = document.activeElement?.id, pos = active ? document.activeElement.selectionStart : null;
   const scrolls = [...document.querySelectorAll('.scroll')].map(e => e.scrollTop);
   handlers.clear();
-  const html = blockedBanner() + SCREENS[screen]();
+  const html = blockedBanner() + SCREENS[screen]() + quitDialog();
+  if (html === shown) return;
+  shown = html;
   if (keepFocusedField(html)) { [...document.querySelectorAll('.scroll')].forEach((e, i) => { e.scrollTop = scrolls[i] ?? 0; }); return; }
   document.getElementById('app').innerHTML = html;
   [...document.querySelectorAll('.scroll')].forEach((e, i) => { e.scrollTop = scrolls[i] ?? 0; });

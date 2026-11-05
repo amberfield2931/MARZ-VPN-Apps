@@ -46,3 +46,8 @@ required-features = ["lab"]
 name = "marz-controller-lab"
 path = "src/bin/controller_lab.rs"
 required-features = ["lab"]
+
+[[bin]]
+name = "marz-quit-lab"
+path = "src/bin/quit_lab.rs"
+required-features = ["lab"]
