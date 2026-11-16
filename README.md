@@ -4,9 +4,11 @@ Official client apps of [MARZ VPN](https://marzvpn.com): downloads are in [Relea
 
 | Platform | Package |
 |---|---|
-| Android | `MARZ-VPN-Android-1.0.2.apk` (Stable) |
-| Windows 11 x64 | `MARZ-VPN-Setup-0.1.8.exe` (Stable) |
-| Linux amd64 (.deb) | `MARZ-VPN-0.1.2-7-amd64.deb` (Stable) |
+| Android 7.0+ (arm64-v8a) | `MARZ-VPN-Android-1.0.3.apk` (Stable) |
+| Linux amd64 (.deb) | `MARZ-VPN-0.1.2-8-amd64.deb` (Stable) |
+| Windows 11 x64 | `MARZ-VPN-Setup-0.1.9.exe` (Beta) |
+
+Current release: [stable-2026-11-16](../../releases/tag/stable-2026-11-16). Windows 0.1.9 is a Beta: it passed automated tests and tests under Wine, but has not been run on real Windows 11 yet, so its Kill Switch on real Windows is not yet confirmed. The Android app has no Kill Switch of its own. There is no MARZ VPN app for iPhone or macOS; the subscription works there in compatible third-party clients.
 
 Instructions: [Android](https://marzvpn.com/android), [Windows](https://marzvpn.com/windows), [Linux](https://marzvpn.com/linux). Each release lists SHA-256 sums, licenses and the complete corresponding source of its builds. The same files are also on the official SourceForge mirror: https://sourceforge.net/projects/marz-vpn/
 
