@@ -5,6 +5,7 @@
 //! turn it off (the helper keeps retrying); only the user's button, or the end of the session, does. What the
 //! connection really does is shown separately: `traffic` comes from real checks through the tunnel.
 use crate::api::{ApiError, AppApi, LoginProgress};
+use crate::catalog::{self, Plan};
 use crate::checkout;
 use crate::helper_client::{HelperClient, HelperError};
 use crate::model::{migrate_choice, Account, Server, Subscription};
@@ -123,6 +124,9 @@ pub enum UpdateUi {
     Failed,
 }
 
+/// Where the plans come from: the App API's public catalog, replaced in tests.
+pub type CatalogSource = Arc<dyn Fn() -> Result<Value, ()> + Send + Sync>;
+
 /// Where the manifest comes from: one small public file, replaced in tests.
 pub type UpdateSource = Arc<dyn Fn() -> Result<Vec<u8>, ()> + Send + Sync>;
 
@@ -172,6 +176,10 @@ pub struct View {
     pub checkout: CheckoutUi,
     pub quit: QuitUi,
     pub update: UpdateUi,
+    /// The plans to offer, already checked (catalog.rs). Never empty: built-in Basic at worst.
+    pub catalog: Vec<Plan>,
+    /// server | cached | builtin
+    pub catalog_source: String,
     pub prefs: Prefs,
     pub version: String,
     pub is_test_build: bool,
@@ -202,6 +210,8 @@ pub struct Controller {
     me: Mutex<Weak<Controller>>,
     update_source: Mutex<UpdateSource>,
     update_busy: AtomicBool,
+    catalog_source: Mutex<Option<CatalogSource>>,
+    catalog_busy: AtomicBool,
 }
 
 fn unix_now() -> i64 {
@@ -241,6 +251,9 @@ impl Controller {
         let cached_routes = if signed_in { prefs.routes.clone() } else { None };
         // A version found earlier stays on show between the daily checks, unless this app is already that version or newer.
         let update = prefs.update_latest.as_deref().filter(|l| updates::is_newer(l, version) == Some(true)).map_or(UpdateUi::Idle, |l| UpdateUi::Available { version: l.to_string() });
+        // The last catalog the server gave, checked again by today's rules; else Basic only.
+        let cached = prefs.catalog.as_ref().map(catalog::parse).filter(|p| !p.is_empty());
+        let (plans, plans_source) = cached.map_or_else(|| (catalog::builtin(), "builtin"), |p| (p, "cached"));
         let view = View {
             signed_in,
             account,
@@ -270,6 +283,8 @@ impl Controller {
             checkout: CheckoutUi::Idle,
             quit: QuitUi::Idle,
             update,
+            catalog: plans,
+            catalog_source: plans_source.into(),
             prefs,
             version: version.to_string(),
             is_test_build,
@@ -291,6 +306,8 @@ impl Controller {
             me: Mutex::new(Weak::new()),
             update_source: Mutex::new(production_update_source()),
             update_busy: AtomicBool::new(false),
+            catalog_source: Mutex::new(None),
+            catalog_busy: AtomicBool::new(false),
         });
         *c.me.lock().unwrap() = Arc::downgrade(&c);
         c
@@ -331,10 +348,44 @@ impl Controller {
         if self.api.pending_telegram_login().is_some() {
             self.telegram_resume();
         }
+        self.background(|c| c.refresh_catalog());
         self.background(|c| {
             std::thread::sleep(UPDATE_CHECK_DELAY);
             c.auto_update_check(unix_now());
         });
+    }
+
+    /// At start and each time Plans opens. A catalog with nothing valid in it changes nothing: what was shown stays.
+    pub fn catalog_refresh(self: &Arc<Self>) {
+        self.background(|c| c.refresh_catalog());
+    }
+
+    pub fn refresh_catalog(&self) {
+        if self.catalog_busy.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let source = self.catalog_source.lock().unwrap().clone();
+        let answer = match source {
+            Some(f) => f(),
+            None => self.api.catalog().map_err(|_| ()),
+        };
+        if let Ok(raw) = answer {
+            let plans = catalog::parse(&raw);
+            if !plans.is_empty() {
+                self.change(|v| {
+                    v.catalog = plans;
+                    v.catalog_source = "server".into();
+                    v.prefs.catalog = Some(raw);
+                });
+                self.save_prefs();
+            }
+        }
+        self.catalog_busy.store(false, Ordering::SeqCst);
+    }
+
+    /// Tests only: the catalog comes from here instead of the App API.
+    pub fn set_catalog_source(&self, source: CatalogSource) {
+        *self.catalog_source.lock().unwrap() = Some(source);
     }
 
     /// The Settings button.
@@ -1114,6 +1165,12 @@ impl Controller {
         if matches!(self.read(|v| v.checkout.clone()), CheckoutUi::Requesting) {
             return None;
         }
+        // Only a plan this app is showing from the catalog: never the previous plan, never a Pro code without its descriptor.
+        if !self.read(|v| v.catalog.iter().any(|p| p.code == plan)) {
+            let action = action.to_string();
+            self.change(|v| v.checkout = CheckoutUi::Failed { problem: "generic".into(), action, source: None, has_profiles: false });
+            return None;
+        }
         self.change(|v| v.checkout = CheckoutUi::Requesting);
         let locale = checkout::api_locale(language);
         let (source, has_profiles) = self.read(|v| {
@@ -1132,6 +1189,9 @@ impl Controller {
                 Some(i.url)
             }
             Err(e) => {
+                if e.code == "app_update_required" {
+                    self.refresh_catalog();
+                }
                 let problem = checkout::problem(&e.code, e.status).to_string();
                 let action = action.to_string();
                 self.change(|v| v.checkout = CheckoutUi::Failed { problem, action, source, has_profiles });
@@ -1784,5 +1844,60 @@ mod update_tests {
         std::fs::write(d.join("prefs.json"), r#"{"theme":"dark","language":"ru","kill_switch":false}"#).unwrap();
         let v = open(&d, "0.1.2-6").view();
         assert_eq!((v.prefs.theme.as_str(), v.prefs.kill_switch, v.prefs.update_checked_at, v.prefs.update_latest), ("dark", false, 0, None));
+    }
+
+    fn catalog_answer(pro: bool) -> Value {
+        let mut c = json!({"plans": [{"code": "basic", "period_days": 30, "quota_bytes": 107374182400u64, "price_usd": "2.00"}, {"code": "unlimited", "period_days": 30, "quota_bytes": null, "price_usd": "4.00"}, {"code": "unlimited_6m", "period_days": 180, "quota_bytes": null, "price_usd": "20.00"}]});
+        if pro {
+            for (i, n) in [(1, 1), (2, 6)] {
+                c["plans"][i]["product"] = json!("pro");
+                c["plans"][i]["pro"] = json!({"full_speed_bytes": 300000000000u64, "package_days": 30, "packages": n, "after_full_speed_bps": 2000000, "speed_limit_scope": "account", "data_cap": null});
+            }
+        }
+        c
+    }
+
+    fn codes(c: &Controller) -> (Vec<String>, String) {
+        let v = c.view();
+        (v.catalog.iter().map(|p| p.code.clone()).collect(), v.catalog_source)
+    }
+
+    #[test]
+    fn plans_come_from_the_catalog_then_the_cache_then_basic_only() {
+        let (c, d) = make("t");
+        assert_eq!(codes(&c), (vec!["basic".to_string()], "builtin".to_string()), "nothing read yet: Basic only, no Pro");
+        c.set_catalog_source(Arc::new(|| Err(())));
+        c.refresh_catalog();
+        assert_eq!(codes(&c).0, ["basic"]);
+        c.set_catalog_source(Arc::new(|| Ok(catalog_answer(false))));
+        c.refresh_catalog();
+        assert_eq!(codes(&c), (vec!["basic".to_string()], "server".to_string()), "Pro off: the previous plan is never offered");
+        c.set_catalog_source(Arc::new(|| Ok(catalog_answer(true))));
+        c.refresh_catalog();
+        assert_eq!(codes(&c).0, ["basic", "unlimited", "unlimited_6m"]);
+        // Unreachable or nonsense: what was shown stays.
+        c.set_catalog_source(Arc::new(|| Err(())));
+        c.refresh_catalog();
+        c.set_catalog_source(Arc::new(|| Ok(json!({"plans": []}))));
+        c.refresh_catalog();
+        assert_eq!(codes(&c).0, ["basic", "unlimited", "unlimited_6m"]);
+        // Next start, offline: the last valid catalog.
+        let again = open(&d, "t");
+        assert_eq!(codes(&again), (vec!["basic".to_string(), "unlimited".to_string(), "unlimited_6m".to_string()], "cached".to_string()));
+        again.set_catalog_source(Arc::new(|| Ok(catalog_answer(false))));
+        again.refresh_catalog();
+        assert_eq!(codes(&open(&d, "t")), (vec!["basic".to_string()], "cached".to_string()), "Pro switched off again: the cache follows");
+    }
+
+    #[test]
+    fn checkout_only_for_a_plan_on_show() {
+        let (c, _d) = make("t");
+        assert_eq!(c.checkout_start("unlimited", "buy", None, "en", None), None);
+        assert!(matches!(c.view().checkout, CheckoutUi::Failed { ref problem, .. } if problem == "generic"), "{:?}", c.view().checkout);
+        c.checkout_reset();
+        c.set_catalog_source(Arc::new(|| Ok(catalog_answer(false))));
+        c.refresh_catalog();
+        assert_eq!(c.checkout_start("unlimited_6m", "buy", None, "en", None), None);
+        assert!(matches!(c.view().checkout, CheckoutUi::Failed { ref problem, .. } if problem == "generic"));
     }
 }

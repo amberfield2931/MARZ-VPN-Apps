@@ -89,7 +89,27 @@ DESKTOP = {
     'update_failed': ('Could not check for updates.', 'Не удалось проверить обновления.', 'بررسی به\u200cروزرسانی انجام نشد.', '无法检查更新。'),
     'update_retry': ('Try again', 'Повторить', 'تلاش دوباره', '重试'),
     'desktop_preview_build': ('Test build. Not for distribution.', 'Тестовая сборка. Не для распространения.', 'نسخهٔ آزمایشی. برای توزیع نیست.', '测试版本，请勿分发。'),
+    # Pro (owner decision 2026-11-16), wording of the approved site copy site/frontend/src/data/pro.ts (the same source as
+    # Android 1.0.3). Every number is the server's catalog or entitlement, formatted by the app: %s, never typed in here.
+    'plan_pro_badge': ('Unlimited data', 'Безлимитный трафик', 'ترافیک نامحدود', '不限流量'),
+    'plan_pro_name_months': ('Pro %1$s months (%2$s days)', 'Pro %1$s месяцев (%2$s дней)', 'Pro %1$s ماه (%2$s روز)', 'Pro %1$s 个月（%2$s 天）'),
+    'plan_pro_full_speed': ('%1$s at full speed every %2$s days', '%1$s на полной скорости каждые %2$s дней', 'هر %2$s روز %1$s با سرعت کامل', '每 %2$s 天 %1$s 全速流量'),
+    'plan_pro_after': ('Unlimited data at up to %1$s after %2$s', 'После %2$s — безлимитный трафик на скорости до %1$s', 'پس از %2$s، ترافیک نامحدود با سرعت حداکثر %1$s', '用完 %2$s 后不限流量，速度最高 %1$s'),
+    'plan_pro_reset': ('Full speed resets with each new %1$s-day package', 'Полная скорость возвращается с каждым новым %1$s-дневным пакетом', 'با هر بسته %1$s روزه جدید، سرعت کامل برمی‌گردد', '每个新的 %1$s 天流量包自动恢复全速'),
+    'plan_pro_packages': ('%1$s × %2$s-day packages, %3$s at full speed each', '%1$s × %2$s-дневных пакетов, в каждом %3$s на полной скорости', '%1$s بسته %2$s روزه، هرکدام با %3$s سرعت کامل', '%1$s 个 %2$s 天流量包，每个包含 %3$s 全速流量'),
+    'plan_pro_then': ('then up to %1$s until the next package', 'затем до %1$s до начала следующего пакета', 'سپس حداکثر %1$s تا شروع بسته بعدی', '之后最高 %1$s，直至下一个流量包开始'),
+    'plan_pro_save': ('Save %1$s compared with %2$s × %3$s-day payments.', 'Экономия %1$s по сравнению с %2$s оплатами по %3$s дней.', '%1$s صرفه‌جویی نسبت به %2$s پرداخت %3$s روزه.', '比分 %2$s 次每次 %3$s 天付款节省 %1$s。'),
+    'plan_pro_left': ('%1$s of %2$s left in this package', 'В этом пакете осталось %1$s из %2$s', '%1$s از %2$s در این بسته باقی مانده است', '本流量包剩余 %1$s（共 %2$s）'),
+    'plan_pro_limited': ('%1$s used — up to %2$s until %3$s', '%1$s израсходованы — до %3$s скорость до %2$s', '%1$s مصرف شد — تا %3$s سرعت حداکثر %2$s', '%1$s 已用完 — %3$s 前速度最高 %2$s'),
+    'plan_checking_details': ('Checking plan details', 'Проверяем детали тарифа', 'در حال بررسی جزئیات طرح', '正在核实套餐详情'),
+    # A plan paid before Pro: never named; it keeps its rights until its paid end.
+    'plan_your_paid': ('Your paid plan', 'Ваш оплаченный тариф', 'طرح پرداخت‌شده شما', '您的付费套餐'),
+    'plan_no_limit_until': ('No data limit until %1$s', 'Без ограничения трафика до %1$s', 'بدون محدودیت حجم تا %1$s', '%1$s 前不限流量'),
+    'plan_paid': ('Paid plan', 'Оплаченный тариф', 'طرح پرداخت‌شده', '付费套餐'),
 }
+# Android strings the desktop no longer ships: the card of the plan sold before Pro (owner decision 2026-11-16: its name,
+# badge and "no speed cap" disappear in every language). Removing one more needs it added here.
+DROP = {'plan_unlimited_badge', 'plan_no_speed_cap', 'plan_no_traffic_limit', 'plan_ip3'}
 
 args = [a for a in sys.argv[1:] if a != '--allow-remove']
 repo, out = args[0], args[1]
@@ -110,7 +130,9 @@ for index, (locale, folder) in enumerate(LOCALES.items()):
             table[name[5:]] = text.replace("\\'", "'").replace('\\"', '"').replace('\\n', '\n').replace('\\@', '@')
     for name, values in DESKTOP.items():
         table[name] = values[index]
-    lost = sorted(existing - set(table))
+    for name in DROP:
+        table.pop(name, None)
+    lost = sorted(existing - set(table) - DROP)
     if lost and '--allow-remove' not in sys.argv:
         sys.exit(f'REFUSED: these strings exist in {out} but not in Android {TAG} or DESKTOP; add them to DESKTOP first: {lost}')
     with open(f'{out}/{locale}.json', 'w', encoding='utf-8') as f:

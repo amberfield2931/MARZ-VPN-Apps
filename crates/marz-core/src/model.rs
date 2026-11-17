@@ -41,8 +41,48 @@ impl Account {
     }
 }
 
-/// `kind`: trial | basic | unlimited | other. Other = older or special profiles: Marzban's own numbers,
-/// without inventing a plan name.
+/// The current 30-day package of a Pro plan, as the server reports it. Display only: the limits are enforced by the
+/// server, never here.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProStatus {
+    /// Decimal bytes (300 GB = 300 * 10^9).
+    pub limit_bytes: i64,
+    pub remaining_full_speed_bytes: i64,
+    pub limited: bool,
+    /// Bits per second while limited.
+    pub normal_speed_limit_bps: Option<i64>,
+    /// When full speed comes back: the next package, or none when this is the plan's last one.
+    pub next_package_at: Option<i64>,
+    pub plan_end: i64,
+    /// The server's numbers are older than it trusts: the app says it is checking instead of showing them.
+    pub stale: bool,
+}
+
+impl ProStatus {
+    /// None when anything does not add up: the app then says it is checking the plan, and shows no numbers.
+    fn parse(p: &Value) -> Option<Self> {
+        let num = |k: &str| p.get(k).and_then(Value::as_i64);
+        let s = ProStatus {
+            limit_bytes: num("limit_bytes").filter(|l| *l > 0)?,
+            remaining_full_speed_bytes: num("remaining_full_speed_bytes").filter(|r| *r >= 0)?,
+            limited: p.get("limited").and_then(Value::as_bool)?,
+            normal_speed_limit_bps: num("normal_speed_limit_bps").filter(|b| *b > 0),
+            next_package_at: num("next_package_at").filter(|t| *t > 0),
+            plan_end: num("plan_end").filter(|t| *t > 0)?,
+            stale: p.get("stale").and_then(Value::as_bool).unwrap_or(true),
+        };
+        let used = num("used_bytes").filter(|u| *u >= 0)?;
+        let consistent = s.remaining_full_speed_bytes <= s.limit_bytes
+            && s.remaining_full_speed_bytes == (s.limit_bytes - used).max(0)
+            && (!s.limited || s.normal_speed_limit_bps.is_some())
+            && s.next_package_at.is_none_or(|n| n <= s.plan_end);
+        consistent.then_some(s)
+    }
+}
+
+/// `kind`: trial | basic | pro | unlimited | verifying | other. `unlimited` is a plan paid before Pro, kept until its
+/// paid end; its old name is never shown. `verifying`: a paid plan the server is still checking. Other = older or special
+/// profiles: Marzban's own numbers, without inventing a plan name.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Entitlement {
     pub kind: String,
@@ -50,6 +90,9 @@ pub struct Entitlement {
     pub quota_bytes: Option<i64>,
     pub used_bytes: Option<i64>,
     pub bonus_bytes: Option<i64>,
+    /// kind pro only; None there means "checking plan details".
+    #[serde(default)]
+    pub pro: Option<ProStatus>,
 }
 
 impl Entitlement {
@@ -59,12 +102,16 @@ impl Entitlement {
         let used = e.get("used_bytes").and_then(Value::as_i64).unwrap_or(0);
         let bonus = e.pointer("/bonus/reserve_bytes").and_then(Value::as_i64).filter(|b| *b > 0);
         let kind = e.get("kind").and_then(Value::as_str).unwrap_or("");
+        let plain = |kind: &str, quota_bytes, used_bytes| Entitlement { kind: kind.into(), ends_at, quota_bytes, used_bytes, bonus_bytes: bonus, pro: None };
         match kind {
-            "unlimited" => Entitlement { kind: "unlimited".into(), ends_at, quota_bytes: None, used_bytes: None, bonus_bytes: bonus },
-            "trial" => Entitlement { kind: "trial".into(), ends_at, quota_bytes: Some(quota.unwrap_or(0)), used_bytes: Some(used), bonus_bytes: bonus },
-            "basic" if quota.is_some() => Entitlement { kind: "basic".into(), ends_at, quota_bytes: quota, used_bytes: Some(used), bonus_bytes: bonus },
-            "basic" => Entitlement { kind: "other".into(), ends_at, quota_bytes: None, used_bytes: None, bonus_bytes: bonus },
-            _ => Entitlement { kind: "other".into(), ends_at, quota_bytes: quota, used_bytes: quota.map(|_| used), bonus_bytes: bonus },
+            // Pro has no data cap: its package numbers live only under `pro`, never as a quota.
+            "pro" => Entitlement { pro: e.get("pro").and_then(ProStatus::parse), ..plain("pro", None, None) },
+            "subscription" => plain("verifying", None, None),
+            "unlimited" => plain("unlimited", None, None),
+            "trial" => plain("trial", Some(quota.unwrap_or(0)), Some(used)),
+            "basic" if quota.is_some() => plain("basic", quota, Some(used)),
+            "basic" => plain("other", None, None),
+            _ => plain("other", quota, quota.map(|_| used)),
         }
     }
 }
@@ -182,6 +229,48 @@ pub fn migrate_choice(chosen: &str, old: &[Server], new: &[Server]) -> Option<St
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn pro_json(used: i64, limited: bool, stale: bool) -> Value {
+        json!({"kind": "pro", "tier": "pro", "ends_at": 9000, "quota_bytes": null, "used_bytes": null, "pro": {
+            "used_bytes": used, "limit_bytes": 300_000_000_000i64, "remaining_full_speed_bytes": (300_000_000_000i64 - used).max(0),
+            "speed_mode": if limited { "throttled" } else { "full" }, "limited": limited, "normal_speed_limit_bps": if limited { json!(2_000_000) } else { json!(null) },
+            "package_start": 100, "package_end": 2000, "next_package_at": 2000, "plan_end": 9000, "updated_at": 50, "stale": stale}})
+    }
+
+    #[test]
+    fn pro_package_is_read_and_never_becomes_a_quota() {
+        let e = Entitlement::parse(&pro_json(100_000_000_000, false, false));
+        assert_eq!((e.kind.as_str(), e.quota_bytes, e.used_bytes), ("pro", None, None));
+        let p = e.pro.unwrap();
+        assert_eq!((p.limit_bytes, p.remaining_full_speed_bytes, p.limited, p.normal_speed_limit_bps, p.next_package_at, p.plan_end, p.stale), (300_000_000_000, 200_000_000_000, false, None, Some(2000), 9000, false));
+        let l = Entitlement::parse(&pro_json(300_000_000_000, true, false)).pro.unwrap();
+        assert_eq!((l.remaining_full_speed_bytes, l.limited, l.normal_speed_limit_bps), (0, true, Some(2_000_000)));
+        assert!(Entitlement::parse(&pro_json(1, false, true)).pro.unwrap().stale);
+    }
+
+    #[test]
+    fn pro_numbers_that_do_not_add_up_are_not_shown() {
+        for (path, v) in [("/pro/limit_bytes", json!(0)), ("/pro/remaining_full_speed_bytes", json!(5)), ("/pro/limited", json!("yes")), ("/pro/plan_end", json!(null)), ("/pro/next_package_at", json!(99999)), ("/pro", json!(null))] {
+            let mut j = pro_json(1000, false, false);
+            *j.pointer_mut(path).unwrap() = v;
+            let e = Entitlement::parse(&j);
+            assert_eq!((e.kind.as_str(), e.pro.is_none()), ("pro", true), "{path}");
+        }
+        let mut j = pro_json(300_000_000_000, true, false);
+        j["pro"]["normal_speed_limit_bps"] = json!(null);
+        assert!(Entitlement::parse(&j).pro.is_none(), "limited without its speed");
+        let mut j = pro_json(10, false, false);
+        j["pro"].as_object_mut().unwrap().remove("stale");
+        assert!(Entitlement::parse(&j).pro.unwrap().stale, "unknown freshness counts as stale");
+    }
+
+    #[test]
+    fn plan_being_verified_and_previous_plan() {
+        let v = Entitlement::parse(&json!({"kind": "subscription", "tier": "verifying", "ends_at": 5, "quota_bytes": null}));
+        assert_eq!((v.kind.as_str(), v.quota_bytes, v.pro), ("verifying", None, None));
+        let u = Entitlement::parse(&json!({"kind": "unlimited", "tier": "legacy_unlimited", "ends_at": 5, "quota_bytes": null}));
+        assert_eq!((u.kind.as_str(), u.quota_bytes, u.ends_at), ("unlimited", None, 5));
+    }
 
     #[test]
     fn unlimited_never_shows_numbers() {

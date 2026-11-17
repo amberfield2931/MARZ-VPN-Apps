@@ -3,7 +3,7 @@ use crate::model::Server;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct Prefs {
     /// system | light | dark
@@ -20,11 +20,13 @@ pub struct Prefs {
     pub update_checked_at: i64,
     /// A newer published version found by the last check, shown until a check says otherwise.
     pub update_latest: Option<String>,
+    /// The last catalog answer that had a valid plan, as the server sent it; used while the server cannot be reached.
+    pub catalog: Option<serde_json::Value>,
 }
 
 impl Default for Prefs {
     fn default() -> Self {
-        Prefs { theme: "system".into(), language: "system".into(), welcome_seen: false, server: None, routes: None, kill_switch: true, update_checked_at: 0, update_latest: None }
+        Prefs { theme: "system".into(), language: "system".into(), welcome_seen: false, server: None, routes: None, kill_switch: true, update_checked_at: 0, update_latest: None, catalog: None }
     }
 }
 

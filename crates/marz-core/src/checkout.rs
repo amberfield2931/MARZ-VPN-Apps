@@ -70,6 +70,9 @@ pub fn problem(code: &str, status: u16) -> &'static str {
         "device_signature_required" | "invalid_device_signature" => "clock",
         "network" => "network",
         "handoff_expired_or_used" | "handoff_expired" => "expired",
+        // The server's plans changed since this app read them (Pro switched on or off): payment is not available
+        // for that offer now; the catalog is read again.
+        "app_update_required" => "unavailable",
         _ if status == 404 => "feature_off",
         _ if status == 429 => "too_many",
         _ if status >= 500 => "unavailable",
@@ -86,6 +89,17 @@ mod tests {
     fn exact_website_link() {
         assert!(validate_link("website", &format!("https://marzvpn.com/checkout?plan=basic&app=1#app={H}"), "basic", "en"));
         assert!(validate_link("website", &format!("https://marzvpn.com/ru/checkout?plan=unlimited&app=1#app={H}"), "unlimited", "ru"));
+    }
+
+    #[test]
+    fn six_month_pro_links() {
+        assert!(validate_link("website", &format!("https://marzvpn.com/checkout?plan=unlimited_6m&app=1#app={H}"), "unlimited_6m", "en"));
+        assert!(validate_link("website", &format!("https://marzvpn.com/zh-cn/checkout?plan=unlimited_6m&app=1#app={H}"), "unlimited_6m", "zh-cn"));
+        assert!(validate_link("telegram_bot", &format!("https://t.me/MarzReality_bot?start=apppay_{H}"), "unlimited_6m", "fa"));
+        // The link must name exactly the plan that was asked for.
+        assert!(!validate_link("website", &format!("https://marzvpn.com/checkout?plan=unlimited&app=1#app={H}"), "unlimited_6m", "en"));
+        assert!(!validate_link("website", &format!("https://marzvpn.com/checkout?plan=unlimited_6m&app=1#app={H}"), "unlimited", "en"));
+        assert!(!validate_link("website", &format!("https://marzvpn.com/checkout?plan=unlimited_6m&app=1#app={H}"), "basic", "en"));
     }
 
     #[test]
@@ -123,6 +137,7 @@ mod tests {
         assert_eq!(problem("anything", 500), "unavailable");
         assert_eq!(problem("anything", 400), "generic");
         assert_eq!(problem("invalid_device_signature", 401), "clock");
+        assert_eq!(problem("app_update_required", 409), "unavailable");
     }
 
     #[test]

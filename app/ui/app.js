@@ -27,7 +27,7 @@ const handlers = new Map();
 
 function t(key, ...args) {
   let text = T[key] ?? EN[key] ?? key;
-  args.forEach((a, i) => { text = text.replace(new RegExp(`%${i + 1}\\$[ds]`, 'g'), a); });
+  args.forEach((a, i) => { text = text.replace(new RegExp(`%${i + 1}\\$[ds]`, 'g'), () => a); }); // a function: "$4" stays "$4"
   return text;
 }
 const on = fn => { const id = 'h' + handlers.size; handlers.set(id, fn); return `data-h="${id}"`; };
@@ -50,6 +50,18 @@ function formatBytes(bytes) {
   if (gib >= 1) return `${n(gib, gib >= 10 || gib === Math.floor(gib) ? 0 : 1)} ${ru ? 'ГиБ' : 'GiB'}`;
   return `${n(bytes / 1024 ** 2, 0)} ${ru ? 'МиБ' : 'MiB'}`;
 }
+// Decimal units (10^9 bytes, 10^6 bit/s): the server counts Pro this way. Never mixed with formatBytes' binary GiB in one text.
+const DECIMAL = { ru: ['ГБ', 'МБ', 'Мбит/с'], fa: ['گیگابایت', 'مگابایت', 'مگابیت‌برثانیه'] };
+const decUnits = () => DECIMAL[lang] ?? ['GB', 'MB', 'Mbps'];
+const num = (v, d = 0) => new Intl.NumberFormat(lang, { minimumFractionDigits: d, maximumFractionDigits: d }).format(v);
+function formatGB(bytes) {
+  const gb = bytes / 1e9, [g, m] = decUnits();
+  if (gb >= 1) { const d = gb >= 10 || gb === Math.floor(gb) ? 0 : 1; return `${num(Math.floor(gb * 10 ** d) / 10 ** d, d)} ${g}`; }
+  return `${num(Math.floor(bytes / 1e6))} ${m}`;
+}
+const formatMbps = bps => { const v = bps / 1e6; return `${num(v, Number.isInteger(v) ? 0 : 1)} ${decUnits()[2]}`; };
+const cents = price => Math.round(Number(price) * 100);
+const usd = c => '$' + (c % 100 === 0 ? String(c / 100) : (c / 100).toFixed(2));
 const formatDate = sec => new Intl.DateTimeFormat(lang, { dateStyle: 'medium' }).format(new Date(sec * 1000));
 const SHORT = { US: { ru: 'США', en: 'USA', fa: 'آمریکا', 'zh-CN': '美国' } };
 function countryName(code) {
@@ -94,6 +106,7 @@ function go(next) {
   stack.push(screen); screen = next;
   if (next === 'servers') act('route_check_start'); // once per opening, as RC6
   if (next === 'telegram') act('telegram_resume');
+  if (next === 'plans') act('catalog_refresh'); // the plans on offer are the server's of this moment
   render();
 }
 function goBack() {
@@ -176,6 +189,14 @@ function traffic(quota, used) {
   return `<div style="display:flex;flex-direction:column;gap:6px"><p class="b-l">${esc(t('traffic_remaining', formatBytes(left), formatBytes(quota)))}</p>
     <div class="progress"><div style="width:${quota > 0 ? left / quota * 100 : 0}%"></div></div></div>`;
 }
+// The server's numbers of the current package; stale or incomplete numbers are not shown.
+function proPackage(p) {
+  if (!p || p.stale) return `<p class="b-m muted">${esc(t('plan_checking_details'))}</p>`;
+  if (p.limited) return `<p class="b-l">${esc(t('plan_pro_limited', formatGB(p.limit_bytes), formatMbps(p.normal_speed_limit_bps), formatDate(p.next_package_at ?? p.plan_end)))}</p>`;
+  const left = p.remaining_full_speed_bytes;
+  return `<div style="display:flex;flex-direction:column;gap:6px"><p class="b-l">${esc(t('plan_pro_left', formatGB(left), formatGB(p.limit_bytes)))}</p>
+    <div class="progress"><div style="width:${left / p.limit_bytes * 100}%"></div></div></div>`;
+}
 const renewButtons = () => big(t('renew'), () => plans('renew')) + outlined(t('change_plan'), () => plans('change_plan'));
 function subscriptionCard() {
   let body;
@@ -189,10 +210,13 @@ function subscriptionCard() {
     body = `<p class="t-l">${esc(t(title))}</p>`;
     if (sub.state === 'expired') body += `<p class="b-l">${esc(t('subscription_ended', formatDate(e.ends_at)))}</p>`;
     if (sub.state === 'suspended') body += `<p class="b-m muted">${esc(t('subscription_suspended_text'))}</p>`;
-    else body += e.kind === 'trial' ? lime(t('buy_subscription'), () => plans('buy')) : lime(t('renew'), () => plans('renew'));
+    else body += e.kind === 'trial' ? lime(t('buy_subscription'), () => plans('buy')) : e.kind === 'unlimited' || e.kind === 'verifying' ? lime(t('view_plans'), () => plans('change_plan')) : lime(t('renew'), () => plans('renew'));
   } else if (e.kind === 'trial') body = `<p class="t-l">${esc(t('trial_title'))}</p>${expiry(e)}${traffic(e.quota_bytes, e.used_bytes)}${lime(t('buy_subscription'), () => plans('buy'))}`;
   else if (e.kind === 'basic') body = `<p class="t-l">Basic</p>${expiry(e)}${traffic(e.quota_bytes, e.used_bytes)}${renewButtons()}`;
-  else if (e.kind === 'unlimited') body = `<p class="t-l">Unlimited</p>${expiry(e)}<p class="b-l">${esc(t('plan_no_traffic_limit'))}</p>${renewButtons()}`;
+  else if (e.kind === 'pro') body = `<p class="t-l">Pro</p>${expiry(e)}${proPackage(e.pro)}${renewButtons()}`;
+  // A plan paid before Pro: kept until its paid end, never named and never offered again.
+  else if (e.kind === 'unlimited') body = `<p class="t-l">${esc(t('plan_your_paid'))}</p><p class="b-l">${esc(t('plan_no_limit_until', formatDate(e.ends_at)))}</p>${outlined(t('view_plans'), () => plans('change_plan'))}`;
+  else if (e.kind === 'verifying') body = `<p class="t-l">${esc(t('plan_paid'))}</p><p class="b-m muted">${esc(t('plan_checking_details'))}</p>`;
   else body = `<p class="t-l">${esc(t('subscription_active'))}</p>${expiry(e)}${e.quota_bytes != null && e.used_bytes != null ? traffic(e.quota_bytes, e.used_bytes) : ''}${renewButtons()}`;
   return `<div class="card"><p class="l-m muted">${esc(t('subscription_title'))}</p>${body}</div>`;
 }
@@ -298,14 +322,23 @@ function email() {
 const apiLocale = () => ({ ru: 'ru', fa: 'fa', 'zh-CN': 'zh-cn' }[lang] ?? 'en');
 
 // ---- plans --------------------------------------------------------------------------------------
-const CATALOG = [{ code: 'basic', price: '2', days: 30, quota: 100 * 1024 ** 3 }, { code: 'unlimited', price: '4', days: 30, quota: null }];
+// Only what the server's catalog lists, already checked by the core (catalog.rs): Basic, and Pro only with its descriptor.
+const planName = p => p.code === 'basic' ? 'Basic' : p.pro.packages > 1 ? t('plan_pro_name_months', num(p.pro.packages), num(p.period_days)) : 'Pro';
+function planBullets(p) {
+  if (!p.pro) return [t('plan_traffic', formatBytes(p.quota_bytes)), t('plan_all_servers'), t('plan_basic_bonus')];
+  const o = p.pro, full = formatGB(o.full_speed_bytes), speed = formatMbps(o.after_full_speed_bps);
+  if (o.packages === 1) return [t('plan_pro_full_speed', full, num(o.package_days)), t('plan_pro_after', speed, full), t('plan_pro_reset', num(o.package_days)), t('plan_all_servers')];
+  const month = S.catalog.find(x => x.pro && x.pro.packages === 1 && x.pro.full_speed_bytes === o.full_speed_bytes);
+  const save = month ? o.packages * cents(month.price_usd) - cents(p.price_usd) : 0;
+  return [t('plan_pro_packages', num(o.packages), num(o.package_days), full), t('plan_pro_then', speed), t('plan_all_servers'),
+    ...(save > 0 ? [t('plan_pro_save', usd(save), num(o.packages), num(o.package_days))] : [])];
+}
 function planCard(plan, label, fn, { enabled = true, current = false } = {}) {
-  const unl = plan.code === 'unlimited', name = unl ? 'Unlimited' : 'Basic';
-  const bullets = [plan.quota == null ? t('plan_no_traffic_limit') : t('plan_traffic', formatBytes(plan.quota)), t('plan_all_servers'), ...(unl ? [t('plan_no_speed_cap'), t('plan_ip3')] : [t('plan_basic_bonus')])];
-  return `<div class="card${unl ? ' hl' : ''}">${current || unl ? `<span class="badge">${esc(t(current ? 'pay_your_plan' : 'plan_unlimited_badge'))}</span>` : ''}
-    <p class="h-s">${name}</p><div style="display:flex;align-items:flex-end;gap:6px"><span class="price">$${plan.price}</span><span class="t-m muted" style="padding-bottom:6px">${esc(t('plan_period', plan.days))}</span></div>
-    ${bullets.map(b => `<div class="bullet b-l">${esc(b)}</div>`).join('')}
-    ${(unl ? lime : big)(label, fn, { disabled: !enabled })}</div>`;
+  const pro = !!plan.pro;
+  return `<div class="card${pro ? ' hl' : ''}">${current || pro ? `<span class="badge">${esc(t(current ? 'pay_your_plan' : 'plan_pro_badge'))}</span>` : ''}
+    <p class="h-s">${esc(planName(plan))}</p><div style="display:flex;align-items:flex-end;gap:6px"><span class="price">${usd(cents(plan.price_usd))}</span><span class="t-m muted" style="padding-bottom:6px">${esc(t('plan_period', plan.period_days))}</span></div>
+    ${planBullets(plan).map(b => `<div class="bullet b-l">${esc(b)}</div>`).join('')}
+    ${(pro ? lime : big)(label, fn, { disabled: !enabled })}</div>`;
 }
 function checkoutStatus() {
   const c = S.checkout;
@@ -339,7 +372,7 @@ function checkoutStatus() {
 }
 function plansScreen() {
   if (!S.signed_in) {
-    const rows = CATALOG.map(p => planCard(p, t('plan_choose', p.code === 'unlimited' ? 'Unlimited' : 'Basic'), () => { ui.dialog = p.code; render(); })).join('');
+    const rows = S.catalog.map(p => planCard(p, t('plan_choose', planName(p)), () => { ui.dialog = p.code; render(); })).join('');
     const dialog = ui.dialog ? `<div class="dialog-back"><div class="dialog"><p class="t-l">${esc(t('checkout_dialog_title'))}</p><p class="b-m">${esc(t('checkout_dialog_text'))}</p>
       ${big(t('checkout_dialog_continue'), () => { open(LINKS.bot); ui.dialog = null; render(); })}
       ${outlined(t('pay_open_site'), () => { open(site(`/checkout?plan=${ui.dialog}`)); ui.dialog = null; render(); })}
@@ -350,21 +383,23 @@ function plansScreen() {
   const sub = S.subscription, profiles = sub?.profiles ?? [], many = profiles.length > 1;
   const profile = ui.profile ?? (many ? null : sub?.effective_id ?? profiles[0]?.id ?? null);
   const ent = many ? profiles.find(p => p.id === profile)?.entitlement : sub?.entitlement;
-  const currentPlan = ent?.kind === 'basic' || ent?.kind === 'unlimited' ? ent.kind : null;
+  // Basic renews Basic; Pro, and the plan paid before Pro, renew as Pro. Anything else changes plan.
+  const currentPlan = ent?.kind === 'basic' ? 'basic' : ent?.kind === 'pro' || ent?.kind === 'unlimited' ? 'pro' : null;
+  const group = p => p.code === 'basic' ? 'basic' : 'pro';
   const titleKey = { renew: 'pay_title_renew', change_plan: 'pay_title_change' }[ui.plansAction] ?? 'pay_title_buy';
   const chooser = many ? `<div class="card"><p class="t-m">${esc(t('pay_choose_profile'))}</p>${profiles.map(p => {
-    const e = p.entitlement, name = !e ? t('pay_profile_none') : e.kind === 'trial' ? t('trial_title') : e.kind === 'basic' ? 'Basic' : e.kind === 'unlimited' ? 'Unlimited' : t('subscription_active');
+    const e = p.entitlement, name = !e ? t('pay_profile_none') : e.kind === 'trial' ? t('trial_title') : e.kind === 'basic' ? 'Basic' : e.kind === 'pro' ? 'Pro' : e.kind === 'unlimited' || e.kind === 'verifying' ? t('plan_paid') : t('subscription_active');
     const state = !e ? '' : p.state === 'active' ? t('subscription_until', formatDate(e.ends_at)) : p.state === 'limited' ? t('subscription_limited') : p.state === 'suspended' ? t('subscription_suspended') : t('subscription_ended', formatDate(e.ends_at));
     const src = (S.account?.vpn_sources ?? []).find(([i]) => i === p.id)?.[1];
     const sub2 = [state, src === 'bot' ? t('pay_profile_bot') : src === 'site' ? t('pay_profile_site') : ''].filter(Boolean).join(' · ');
     return option('', name, sub2, profile === p.id, null, null, () => { ui.profile = p.id; render(); });
   }).join('')}</div>` : '';
   const busy = S.checkout.state === 'requesting' || (S.checkout.state === 'opened' && S.checkout.order === 'fulfilling');
-  const rows = CATALOG.map(p => {
-    const name = p.code === 'unlimited' ? 'Unlimited' : 'Basic';
-    const planAction = ui.plansAction === 'buy' ? 'buy' : currentPlan === p.code ? 'renew' : ui.plansAction === 'renew' && currentPlan ? 'change_plan' : ui.plansAction;
+  const rows = S.catalog.map(p => {
+    const name = planName(p);
+    const planAction = ui.plansAction === 'buy' ? 'buy' : currentPlan === group(p) ? 'renew' : currentPlan ? 'change_plan' : ui.plansAction;
     const label = { renew: t('pay_renew_plan', name), change_plan: t('pay_switch_plan', name), buy: t('plan_choose', name) }[planAction] + ' · ' + t('pay_open_site');
-    return planCard(p, label, () => act('checkout_start', { plan: p.code, action: planAction, profile, language: lang, channel: null }), { enabled: !busy && (!many || profile), current: currentPlan === p.code });
+    return planCard(p, label, () => act('checkout_start', { plan: p.code, action: planAction, profile, language: lang, channel: null }), { enabled: !busy && (!many || profile), current: group(p) === 'basic' ? currentPlan === 'basic' : ent?.kind === 'pro' });
   }).join('');
   return frame(t(titleKey), `<p class="b-l muted">${esc(t('pay_hint'))}</p>${checkoutStatus()}${chooser}${S.checkout.state === 'opened' || S.checkout.state === 'confirmed' ? '' : rows}
     <p class="b-s muted">${esc(t('payment_methods_note'))}</p>`);
@@ -542,7 +577,7 @@ document.addEventListener('input', e => {
 function update(view) {
   const wasSignedIn = S?.signed_in;
   S = view;
-  if (screen === null) screen = window.__MARZ_START_SCREEN__ || (S.prefs.welcome_seen || S.signed_in ? 'home' : 'welcome');
+  if (screen === null) { screen = window.__MARZ_START_SCREEN__ || (S.prefs.welcome_seen || S.signed_in ? 'home' : 'welcome'); ui.plansAction = window.__MARZ_PLANS_ACTION__ || ui.plansAction; }
   // A finished sign-in leaves the sign-in screens, as RC6 returns to home.
   if (!wasSignedIn && S.signed_in && ['login', 'telegram', 'email', 'welcome'].includes(screen)) { screen = 'home'; stack = []; }
   if (document.activeElement?.tagName === 'INPUT' && screen !== 'email' && screen !== 'settings') return;

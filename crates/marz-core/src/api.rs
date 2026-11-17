@@ -1,7 +1,7 @@
 //! HTTPS client for the MARZ App API, behaviour of Android RC6 HttpAppApi. Every session is bound to a
 //! P-256 device key; refresh, logout and login completion are signed; an access token refreshes once on
 //! 401. No log line anywhere in this module: tokens, ids and bodies have no business in one.
-use crate::checkout;
+use crate::{catalog, checkout};
 use crate::http::Endpoint;
 use crate::model::{Account, Server, Subscription};
 use crate::refresh::{self, AuthClock, AuthStore, Cancel, Outcome, RefreshClient, RefreshTransport, Session, State, Tokens};
@@ -262,6 +262,22 @@ pub struct CheckoutReceipt {
     pub profile_id: String,
     pub channel: String,
     pub state: String,
+}
+
+/// The request of a checkout hand-off. A Pro code carries the catalog acknowledgement: this app showed Pro, not the
+/// previous plan. Basic never does.
+pub fn intent_body(plan: &str, action: &str, vpn_identity: Option<&str>, locale: &str, channel: Option<&str>) -> Value {
+    let mut body = json!({"action": action, "plan": plan, "locale": locale});
+    if let Some(v) = vpn_identity {
+        body["vpn_identity"] = json!(v);
+    }
+    if let Some(c) = channel {
+        body["channel"] = json!(c);
+    }
+    if catalog::is_pro_code(plan) {
+        body["catalog"] = json!(catalog::PRO_ACK);
+    }
+    body
 }
 
 pub struct AppApi {
@@ -540,13 +556,7 @@ impl AppApi {
     }
 
     pub fn create_checkout_intent(&self, plan: &str, action: &str, vpn_identity: Option<&str>, locale: &str, channel: Option<&str>) -> ApiResult<CheckoutIntent> {
-        let mut body = json!({"action": action, "plan": plan, "locale": locale});
-        if let Some(v) = vpn_identity {
-            body["vpn_identity"] = json!(v);
-        }
-        if let Some(c) = channel {
-            body["channel"] = json!(c);
-        }
+        let body = intent_body(plan, action, vpn_identity, locale, channel);
         let r = self.call("POST", "/v1/billing/intent", Some(&body), true, true);
         if r.code != 200 {
             return r.fail();
@@ -685,5 +695,32 @@ mod tests {
         let config = crate::tls::client_config_with(rustls::RootCertStore::empty()).unwrap();
         let api = AppApi::new(Endpoint::parse_with("https://127.0.0.1:1", config).unwrap(), Arc::new(Vault::open(&d, &No)));
         assert_eq!(api.start_telegram_login().unwrap_err().code, "storage_unavailable");
+    }
+
+    #[test]
+    fn intent_carries_the_pro_acknowledgement_only_for_pro_codes() {
+        let basic = intent_body("basic", "renew", Some("v1"), "ru", None);
+        assert_eq!(basic, json!({"action": "renew", "plan": "basic", "locale": "ru", "vpn_identity": "v1"}));
+        assert!(basic.get("catalog").is_none());
+        for plan in ["unlimited", "unlimited_6m"] {
+            let b = intent_body(plan, "buy", None, "en", Some("website"));
+            assert_eq!(b, json!({"action": "buy", "plan": plan, "locale": "en", "channel": "website", "catalog": "pro-1"}));
+        }
+        assert!(intent_body("other", "buy", None, "en", None).get("catalog").is_none());
+    }
+
+    /// Read-only GET of the public production catalog through the app's own client and checks.
+    /// `cargo test -p marz-core --no-default-features live_catalog -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn live_catalog_is_read_by_the_client() {
+        let d = std::env::temp_dir().join(format!("marz-api-test-{}-live", std::process::id()));
+        let api = AppApi::new(Endpoint::parse(PRODUCTION_URL).unwrap(), Arc::new(Vault::open(&d, &FixedKey([5; 32]))));
+        let raw = api.catalog().expect("catalog");
+        let plans = catalog::parse(&raw);
+        eprintln!("live catalog: {raw}\noffered: {:?}", plans.iter().map(|p| (&p.code, &p.price_usd, p.pro.is_some())).collect::<Vec<_>>());
+        assert_eq!(plans.first().map(|p| p.code.as_str()), Some("basic"));
+        let pro_on = raw["plans"].as_array().unwrap().iter().any(|p| p.get("product").and_then(Value::as_str) == Some("pro"));
+        assert_eq!(plans.len() > 1, pro_on, "Pro codes are offered only when the server describes them as Pro");
     }
 }

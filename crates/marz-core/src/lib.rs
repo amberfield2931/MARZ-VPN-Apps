@@ -1,6 +1,7 @@
 //! Business logic shared by the Linux and Windows apps: the App API client, session rotation, encrypted
 //! storage and the payment rules. Ported from Android RC6 (com.marzvpn.app.api), behaviour kept.
 pub mod api;
+pub mod catalog;
 pub mod checkout;
 pub mod http;
 pub mod model;
