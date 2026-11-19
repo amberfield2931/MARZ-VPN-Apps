@@ -22,7 +22,7 @@ const icon = (n, flip) => `<svg class="i${flip ? ' flip' : ''}" viewBox="0 0 24 
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const ltr = v => '⁦' + v + '⁩';
 
-let S = null, T = {}, EN = {}, lang = 'en', screen = null, stack = [], ui = { email: '', code: '', plansAction: 'buy', profile: null, dialog: null, linkEmail: '', linkCode: '', linkSent: false, linkError: null };
+let S = null, T = {}, EN = {}, lang = 'en', screen = null, stack = [], ui = { email: '', code: '', tgCode: '', tgManual: false, plansAction: 'buy', profile: null, dialog: null, linkEmail: '', linkCode: '', linkSent: false, linkError: null };
 const handlers = new Map();
 
 function t(key, ...args) {
@@ -281,11 +281,44 @@ function login() {
     ${big(t('login_telegram'), () => go('telegram'), { icon: 'send' })}<p class="b-m muted">${esc(t('login_chooser_telegram_hint'))}</p>
     ${outlined(t('login_email'), () => go('email'), { icon: 'email' })}<p class="b-m muted">${esc(t('login_chooser_email_hint'))}</p>`);
 }
+// The Telegram code sign-in: a page on marzvpn.com, the code from the bot on the phone, typed on the page (or here).
+const TG_PROGRESS = { waiting: 'desktop_tg_progress_waiting', page_opened: 'desktop_tg_progress_page_opened', code_requested: 'desktop_tg_progress_code_requested',
+  code_sent: 'desktop_tg_progress_code_sent', delivery_failed: 'desktop_tg_progress_delivery_failed' };
+function tgCodeError(st) {
+  const e = st.error;
+  if (e === 'invalid_code') return st.attempts_left != null ? t('desktop_tg_err_wrong', new Intl.NumberFormat(lang).format(st.attempts_left)) : t('error_invalid_code');
+  return t({ invalid_code_format: 'desktop_tg_err_format', code_expired: 'desktop_tg_err_code_expired', code_not_requested: 'desktop_tg_err_not_requested',
+    network: 'desktop_tg_err_network', rate_limited: 'error_too_many', too_many_attempts: 'error_too_many' }[e] ?? 'error_generic');
+}
+// A server-side failure of the Telegram path: the email sign-in is offered instead.
+const tgUnavailable = code => /unavailable|internal_error|try_again|^http_5/.test(code ?? '');
+const toEmail = () => { act('telegram_cancel'); ui.tgManual = false; ui.tgCode = ''; screen = 'email'; render(); };
+const tgClock = expires => { const left = Math.max(expires - Math.floor(Date.now() / 1000), 0); return `${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')}`; };
+function telegramCode(st) {
+  const bad = st.progress === 'delivery_failed';
+  const status = st.offline ? t('desktop_tg_offline') : t(TG_PROGRESS[st.progress] ?? TG_PROGRESS.waiting);
+  const manual = ui.tgManual || !st.can_open_page || st.busy || !!st.error;
+  const entry = manual ? `<div class="card"><p class="b-m">${esc(t('desktop_tg_manual_hint', '\u0000')).replace('\u0000', `<bdi dir="ltr" style="white-space:nowrap">/login ${esc(st.ref)}</bdi>`)}</p>
+      <input class="field" id="tgcode" dir="ltr" type="text" inputmode="numeric" autocomplete="one-time-code" spellcheck="false" placeholder="${esc(t('desktop_tg_code_label'))}" value="${esc(ui.tgCode)}">
+      ${st.error ? `<p class="b-m err">${esc(tgCodeError(st))}</p>` : ''}
+      ${btn('primary', t('login_email_verify'), () => { act('telegram_code', { code: ui.tgCode }); ui.tgCode = ''; }, { disabled: st.busy })}
+      ${textBtn(t('referral_open_bot'), () => open(st.telegram_url || LINKS.bot), { icon: 'send' })}</div>`
+    : textBtn(t('desktop_tg_enter_here'), () => { ui.tgManual = true; render(); });
+  return frame(t('login_telegram'), `<p class="b-l">${esc(t('desktop_tg_code_intro'))}</p>
+    <div class="card hl"><p class="t-m" style="text-align:center">${esc(t('desktop_tg_ref', '').replace(/[:：]\s*$/, '').trim())}</p><div class="code" style="font-size:clamp(28px,10vw,44px);letter-spacing:4px">${esc(st.ref)}</div>
+      <p class="b-m" style="text-align:center">${esc(t('login_telegram_expires_in', ltr(tgClock(st.expires_at))))}</p>
+      <p class="b-s muted" style="text-align:center">${esc(t('desktop_tg_ref_hint'))}</p></div>
+    <div class="waiting" role="status">${bad || st.offline ? '' : '<span class="spinner"></span>'}<span class="${bad || st.offline ? 'err' : ''}">${esc(status)}</span></div>
+    ${st.can_open_page ? big(t('desktop_tg_open_page'), () => act('telegram_open_page')) : ''}
+    ${outlined(t('desktop_tg_use_email'), toEmail, { icon: 'email' })}
+    ${entry}
+    ${textBtn(t('cancel'), () => { ui.tgManual = false; ui.tgCode = ''; act('telegram_cancel'); })}`);
+}
 function telegram() {
   const st = S.telegram;
+  if (st.state === 'code') return telegramCode(st);
   if (st.state === 'waiting') {
-    const left = Math.max(st.expires_at - Math.floor(Date.now() / 1000), 0);
-    const clock = `${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')}`;
+    const clock = tgClock(st.expires_at);
     return frame(t('login_telegram'), `<p class="t-m">${esc(t('login_telegram_remember'))}</p>
       <div class="card hl"><p class="t-m" style="text-align:center">${esc(t('login_telegram_code_title'))}</p><div class="code">${esc(st.match_code)}</div>
       <p class="b-m" style="text-align:center">${esc(t('login_telegram_expires_in', ltr(clock)))}</p></div>
@@ -295,11 +328,13 @@ function telegram() {
       ${textBtn(t('cancel'), () => act('telegram_cancel'))}`);
   }
   const failed = st.state === 'failed';
+  const failure = !failed ? '' : tgUnavailable(st.code) ? t('desktop_tg_err_unavailable') : st.code === 'login_code_attempts' ? t('desktop_tg_err_attempts') : loginError(st.code);
   return frame(t('login_telegram'), `<p class="b-l">${esc(t('login_telegram_intro'))}</p>
-    <div class="card">${[1, 2, 3].map(n => `<div class="step"><b>${new Intl.NumberFormat(lang).format(n)}</b><span class="b-l">${esc(t('login_telegram_step' + n))}</span></div>`).join('')}</div>
-    ${failed ? `<p class="b-m err">${esc(loginError(st.code))}</p>` : ''}
-    ${big(t(failed ? 'login_telegram_new_code' : 'login_telegram_get_code'), () => act('telegram_start'), { disabled: st.state === 'starting' })}
-    ${st.state === 'starting' ? '<div class="spinner"></div>' : ''}`);
+    <div class="card">${[1, 2, 3].map(n => `<div class="step"><b>${new Intl.NumberFormat(lang).format(n)}</b><span class="b-l">${esc(t('desktop_tg_step' + n))}</span></div>`).join('')}</div>
+    ${failed ? `<p class="b-m err">${esc(failure)}</p>` : ''}
+    ${big(t(failed ? 'login_telegram_new_code' : 'desktop_tg_start'), () => { ui.tgManual = false; ui.tgCode = ''; act('telegram_start', { locale: apiLocale() }); }, { disabled: st.state === 'starting', icon: 'send' })}
+    ${st.state === 'starting' ? '<div class="spinner"></div>' : ''}
+    ${failed ? outlined(t('desktop_tg_use_email'), toEmail, { icon: 'email' }) : ''}`);
 }
 function email() {
   const st = S.email;
@@ -571,16 +606,17 @@ document.addEventListener('input', e => {
   const id = e.target.id, v = e.target.value;
   if (id === 'email') ui.email = v.trim();
   if (id === 'code') { ui.code = v.replace(/\D/g, '').slice(0, 6); e.target.value = ui.code; }
+  if (id === 'tgcode') { ui.tgCode = v.replace(/\D/g, '').slice(0, 6); e.target.value = ui.tgCode; }
   if (id === 'linkEmail') ui.linkEmail = v.trim();
   if (id === 'linkCode') { ui.linkCode = v.replace(/\D/g, '').slice(0, 6); e.target.value = ui.linkCode; }
 });
 function update(view) {
   const wasSignedIn = S?.signed_in;
   S = view;
-  if (screen === null) { screen = window.__MARZ_START_SCREEN__ || (S.prefs.welcome_seen || S.signed_in ? 'home' : 'welcome'); ui.plansAction = window.__MARZ_PLANS_ACTION__ || ui.plansAction; }
+  if (screen === null) { screen = window.__MARZ_START_SCREEN__ || (S.prefs.welcome_seen || S.signed_in ? 'home' : 'welcome'); ui.plansAction = window.__MARZ_PLANS_ACTION__ || ui.plansAction; ui.tgManual = !!window.__MARZ_TG_MANUAL__; }
   // A finished sign-in leaves the sign-in screens, as RC6 returns to home.
   if (!wasSignedIn && S.signed_in && ['login', 'telegram', 'email', 'welcome'].includes(screen)) { screen = 'home'; stack = []; }
-  if (document.activeElement?.tagName === 'INPUT' && screen !== 'email' && screen !== 'settings') return;
+  if (document.activeElement?.tagName === 'INPUT' && screen !== 'email' && screen !== 'settings' && screen !== 'telegram') return;
   render();
 }
 window.addEventListener('resize', () => render());

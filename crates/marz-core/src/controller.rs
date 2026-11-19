@@ -4,7 +4,7 @@
 //! The rule the owner cares about most: the VPN switch is the user's. Lost networks and engine exits never
 //! turn it off (the helper keeps retrying); only the user's button, or the end of the session, does. What the
 //! connection really does is shown separately: `traffic` comes from real checks through the tunnel.
-use crate::api::{ApiError, AppApi, LoginProgress};
+use crate::api::{ApiError, AppApi, CodeEntry, LoginProgress, TelegramFlow, TelegramLogin};
 use crate::catalog::{self, Plan};
 use crate::checkout;
 use crate::helper_client::{HelperClient, HelperError};
@@ -43,7 +43,50 @@ pub enum TelegramUi {
     Idle,
     Starting,
     Waiting { telegram_url: String, match_code: String, expires_at: i64 },
+    /// The code flow: the page on marzvpn.com, the code from the bot. The page link (it carries the browser-claim
+    /// secret) is never part of the view; `telegram_open_page` hands it to the shell.
+    Code {
+        #[serde(rename = "ref")]
+        reference: String,
+        /// t.me/<bot>?start=login_<REF>, for a computer with Telegram; empty if the server gave none.
+        telegram_url: String,
+        expires_at: i64,
+        /// waiting | page_opened | code_requested | code_sent | delivery_failed
+        progress: String,
+        attempts_left: Option<u32>,
+        /// The page link has the one shape the app opens.
+        can_open_page: bool,
+        /// The last confirm poll could not reach the App API; the request is kept and polling goes on.
+        offline: bool,
+        /// A code typed in the app is being checked.
+        busy: bool,
+        /// The last in-app entry's refusal: invalid_code, code_expired, code_not_requested, network, ...
+        error: Option<String>,
+    },
     Failed { code: String },
+}
+
+impl TelegramUi {
+    fn waiting(l: &TelegramLogin) -> Self {
+        match l.flow {
+            TelegramFlow::Classic => TelegramUi::Waiting { telegram_url: l.telegram_url.clone(), match_code: l.match_code.clone(), expires_at: l.expires_at },
+            TelegramFlow::Code => TelegramUi::Code {
+                reference: l.reference.clone(),
+                telegram_url: l.telegram_url.clone(),
+                expires_at: l.expires_at,
+                progress: "waiting".into(),
+                attempts_left: None,
+                can_open_page: crate::links::is_device_page(&l.verification_url),
+                offline: false,
+                busy: false,
+                error: None,
+            },
+        }
+    }
+
+    fn is_waiting(&self) -> bool {
+        matches!(self, TelegramUi::Waiting { .. } | TelegramUi::Code { .. })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -200,6 +243,9 @@ pub struct Controller {
     on_change: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
     visible: AtomicBool,
     telegram_epoch: AtomicU64,
+    /// One Telegram request at a time to the App API: the confirm poll and a code typed in the app never overlap,
+    /// so whichever finishes the sign-in, the other sees the changed epoch and stops quietly.
+    telegram_lock: Mutex<()>,
     route_epoch: AtomicU64,
     check_epoch: AtomicU64,
     last_sync: Mutex<Option<Instant>>,
@@ -298,6 +344,7 @@ impl Controller {
             on_change: Mutex::new(None),
             visible: AtomicBool::new(true),
             telegram_epoch: AtomicU64::new(0),
+            telegram_lock: Mutex::new(()),
             route_epoch: AtomicU64::new(0),
             check_epoch: AtomicU64::new(0),
             last_sync: Mutex::new(None),
@@ -345,6 +392,7 @@ impl Controller {
                 }
             }
         });
+        // A request from before a restart keeps going; the page is not opened again by itself.
         if self.api.pending_telegram_login().is_some() {
             self.telegram_resume();
         }
@@ -1047,42 +1095,72 @@ impl Controller {
 
     // ---- Telegram -----------------------------------------------------------------------------------
 
-    /// The number comes first; Telegram opens only on the user's button, so the number can be read.
-    pub fn telegram_start(self: &Arc<Self>) {
+    /// Classic: the number comes first; Telegram opens only on the user's button, so the number can be read.
+    /// Code flow: returns the sign-in page for the shell to open now, on this same button press. Only a link of the
+    /// exact marzvpn.com/device shape is returned; it is kept in the vault with the request, never in the view.
+    pub fn telegram_start(self: &Arc<Self>, locale: &str) -> Option<String> {
+        if matches!(self.read(|v| v.telegram.clone()), TelegramUi::Starting) {
+            return None;
+        }
+        self.telegram_epoch.fetch_add(1, Ordering::SeqCst); // an older request's wait ends
         self.change(|v| v.telegram = TelegramUi::Starting);
-        self.background(|c| match c.api.start_telegram_login() {
+        match self.api.start_telegram_login(locale) {
             Ok(l) => {
-                c.change(|v| v.telegram = TelegramUi::Waiting { telegram_url: l.telegram_url.clone(), match_code: l.match_code.clone(), expires_at: l.expires_at });
-                c.telegram_wait();
+                self.change(|v| v.telegram = TelegramUi::waiting(&l));
+                self.spawn_telegram_wait();
+                (l.flow == TelegramFlow::Code && crate::links::is_device_page(&l.verification_url)).then_some(l.verification_url)
             }
-            Err(e) => c.change(|v| v.telegram = TelegramUi::Failed { code: e.code }),
-        });
+            Err(e) => {
+                self.change(|v| v.telegram = TelegramUi::Failed { code: e.code });
+                None
+            }
+        }
     }
 
-    /// Back on the screen or after a restart: the same request keeps going.
+    /// "Open the page again": the same request's page, for the shell to open. A newer page replaces the older browser.
+    pub fn telegram_open_page(&self) -> Option<String> {
+        if !matches!(self.read(|v| v.telegram.clone()), TelegramUi::Code { .. }) {
+            return None;
+        }
+        let l = self.api.pending_telegram_login()?;
+        (l.flow == TelegramFlow::Code && l.expires_at > unix_now() && crate::links::is_device_page(&l.verification_url)).then_some(l.verification_url)
+    }
+
+    /// Back on the screen or after a restart: the same request keeps going. Nothing is opened again by itself.
     pub fn telegram_resume(self: &Arc<Self>) {
-        if matches!(self.read(|v| v.telegram.clone()), TelegramUi::Waiting { .. }) {
+        if self.read(|v| v.telegram.is_waiting()) {
             return;
         }
         let Some(l) = self.api.pending_telegram_login() else { return };
-        self.change(|v| v.telegram = TelegramUi::Waiting { telegram_url: l.telegram_url.clone(), match_code: l.match_code.clone(), expires_at: l.expires_at });
-        self.background(|c| c.telegram_wait());
+        self.change(|v| v.telegram = TelegramUi::waiting(&l));
+        self.spawn_telegram_wait();
     }
 
-    fn telegram_wait(&self) {
+    /// The epoch is taken here, before the thread runs, so a code typed right away already belongs to this wait.
+    fn spawn_telegram_wait(self: &Arc<Self>) {
         let epoch = self.telegram_epoch.fetch_add(1, Ordering::SeqCst) + 1;
+        self.background(move |c| c.telegram_wait(epoch));
+    }
+
+    fn telegram_wait(&self, epoch: u64) {
         loop {
             std::thread::sleep(Duration::from_secs(2));
+            let _one = self.telegram_lock.lock().unwrap();
             if self.telegram_epoch.load(Ordering::SeqCst) != epoch {
                 return;
             }
             match self.api.poll_telegram_login() {
-                Ok(LoginProgress::Pending) => {}
+                Ok(LoginProgress::Pending(p)) => {
+                    self.telegram_offline(false);
+                    self.telegram_progress(p.progress, p.attempts_left);
+                }
                 Ok(LoginProgress::Done) => {
+                    self.telegram_epoch.fetch_add(1, Ordering::SeqCst);
                     self.change(|v| {
                         v.telegram = TelegramUi::Idle;
                         v.signed_in = true;
                     });
+                    drop(_one);
                     self.sync_now();
                     return;
                 }
@@ -1090,17 +1168,96 @@ impl Controller {
                 Err(e) if e.code == "network" || e.status == 0 && e.code != "login_not_found" => {
                     let expired = self.api.pending_telegram_login().is_none_or(|l| l.expires_at <= unix_now());
                     if expired {
+                        self.telegram_epoch.fetch_add(1, Ordering::SeqCst);
                         self.api.cancel_telegram_login();
                         self.change(|v| v.telegram = TelegramUi::Failed { code: "login_expired".into() });
                         return;
                     }
+                    self.telegram_offline(true);
                 }
                 Err(e) => {
+                    self.telegram_epoch.fetch_add(1, Ordering::SeqCst);
                     self.change(|v| v.telegram = TelegramUi::Failed { code: e.code });
                     return;
                 }
             }
         }
+    }
+
+    fn telegram_offline(&self, now: bool) {
+        if self.read(|v| matches!(v.telegram, TelegramUi::Code { offline, .. } if offline != now)) {
+            self.change(|v| {
+                if let TelegramUi::Code { offline, .. } = &mut v.telegram {
+                    *offline = now;
+                }
+            });
+        }
+    }
+
+    /// The live line of the code flow, from confirm's 202. Unchanged answers change nothing.
+    fn telegram_progress(&self, progress: Option<String>, attempts: Option<u32>) {
+        let differs = self.read(|v| match &v.telegram {
+            TelegramUi::Code { progress: p, attempts_left: a, .. } => progress.as_ref().is_some_and(|x| x != p) || attempts.is_some() && attempts != *a,
+            _ => false,
+        });
+        if differs {
+            self.change(|v| {
+                if let TelegramUi::Code { progress: p, attempts_left: a, .. } = &mut v.telegram {
+                    if let Some(x) = progress {
+                        *p = x;
+                    }
+                    if attempts.is_some() {
+                        *a = attempts;
+                    }
+                }
+            });
+        }
+    }
+
+    /// The code from the bot typed in the app (fallback to the page). Wrong codes count against the same five
+    /// attempts as on the page; the request goes on until it is signed in, burned, rejected or expired.
+    pub fn telegram_code(self: &Arc<Self>, code: String) {
+        if !matches!(self.read(|v| v.telegram.clone()), TelegramUi::Code { busy: false, .. }) {
+            return;
+        }
+        let epoch = self.telegram_epoch.load(Ordering::SeqCst);
+        let set = |c: &Controller, busy: bool, error: Option<String>, attempts: Option<u32>| {
+            c.change(|v| {
+                if let TelegramUi::Code { busy: b, error: e, attempts_left: a, .. } = &mut v.telegram {
+                    *b = busy;
+                    *e = error;
+                    if attempts.is_some() {
+                        *a = attempts;
+                    }
+                }
+            });
+        };
+        set(self, true, None, None);
+        self.background(move |c| {
+            let one = c.telegram_lock.lock().unwrap();
+            if c.telegram_epoch.load(Ordering::SeqCst) != epoch {
+                return; // finished or cancelled meanwhile
+            }
+            match c.api.enter_telegram_code(&code) {
+                Ok(CodeEntry::SignedIn) => {
+                    c.telegram_epoch.fetch_add(1, Ordering::SeqCst);
+                    c.change(|v| {
+                        v.telegram = TelegramUi::Idle;
+                        v.signed_in = true;
+                    });
+                    drop(one);
+                    c.sync_now();
+                }
+                // Cancelled (or a new request) while this code was on its way: its answer belongs to nothing on screen.
+                _ if c.telegram_epoch.load(Ordering::SeqCst) != epoch => {}
+                Ok(CodeEntry::Approved) => set(&c, false, None, None),
+                Ok(CodeEntry::Refused { code, attempts_left }) => set(&c, false, Some(code), attempts_left),
+                Err(e) => {
+                    c.telegram_epoch.fetch_add(1, Ordering::SeqCst);
+                    c.change(|v| v.telegram = TelegramUi::Failed { code: e.code });
+                }
+            }
+        });
     }
 
     pub fn telegram_cancel(&self) {
@@ -1899,5 +2056,120 @@ mod update_tests {
         c.refresh_catalog();
         assert_eq!(c.checkout_start("unlimited_6m", "buy", None, "en", None), None);
         assert!(matches!(c.view().checkout, CheckoutUi::Failed { ref problem, .. } if problem == "generic"));
+    }
+}
+
+#[cfg(test)]
+mod telegram_code_tests {
+    use super::*;
+    use crate::vault::{FixedKey, Vault};
+    use std::sync::atomic::AtomicUsize;
+
+    const CLAIM: &str = "AbCdEfGhIjKlMnOpQrStUvWxYz0123456789_-AbCd";
+
+    /// A controller whose App API refuses every connection at once (nothing listens on port 1).
+    fn make(record: Option<Value>) -> (Arc<Controller>, Arc<Vault>) {
+        static N: AtomicUsize = AtomicUsize::new(0);
+        let dir = std::env::temp_dir().join(format!("marz-tgcode-{}-{}", std::process::id(), N.fetch_add(1, Ordering::SeqCst)));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let vault = Arc::new(Vault::open(&dir, &FixedKey([7; 32])));
+        if let Some(r) = record {
+            assert!(vault.put(vault::PENDING_TELEGRAM, Some(r)));
+        }
+        let config = crate::tls::client_config_with(rustls::RootCertStore::empty()).unwrap();
+        let api = AppApi::new(Endpoint::parse_with("https://127.0.0.1:1", config).unwrap(), vault.clone());
+        (Controller::new(api, HelperClient::new(dir.join("no-service").to_str().unwrap()), &dir, "test", true), vault)
+    }
+
+    fn code_record(url: &str) -> Value {
+        json!({"flow": "code", "login_id": "L".repeat(32), "verifier": "v".repeat(64), "expires_at": unix_now() + 600,
+               "telegram_url": "https://t.me/MarzReality_bot?start=login_K7QP9M2X", "match_code": "", "ref": "K7QP-9M2X", "verification_url": url})
+    }
+
+    fn page() -> String {
+        format!("https://marzvpn.com/ru/device/#c={CLAIM}")
+    }
+
+    fn wait(c: &Controller, f: impl Fn(&TelegramUi) -> bool) -> bool {
+        for _ in 0..100 {
+            if f(&c.view().telegram) {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        false
+    }
+
+    #[test]
+    fn after_a_restart_the_code_request_is_shown_again_and_the_page_is_not_reopened_by_itself() {
+        let (c, _) = make(Some(code_record(&page())));
+        c.telegram_resume();
+        match c.view().telegram {
+            TelegramUi::Code { reference, progress, can_open_page, busy, error, .. } => {
+                assert_eq!((reference.as_str(), progress.as_str(), can_open_page, busy, error), ("K7QP-9M2X", "waiting", true, false, None));
+            }
+            other => panic!("{other:?}"),
+        }
+        // Only the button hands the page to the shell; the view never carries it, nor its secret.
+        assert_eq!(c.telegram_open_page().as_deref(), Some(page().as_str()));
+        let shown = c.view_json().to_string();
+        assert!(!shown.contains(CLAIM) && !shown.contains("verification_url") && !shown.contains("/device/"), "{shown}");
+        assert!(shown.contains(r#""state":"code""#) && shown.contains(r#""ref":"K7QP-9M2X""#), "{shown}");
+        c.telegram_cancel();
+    }
+
+    #[test]
+    fn a_page_link_of_any_other_shape_is_never_opened() {
+        for bad in ["https://evil.example/device/#c=AbCdEfGhIjKlMnOpQrStUvWxYz0123456789", "https://marzvpn.com/account/", "http://marzvpn.com/device/#c=AbCdEfGhIjKlMnOpQrStUvWxYz0123456789"] {
+            let (c, _) = make(Some(code_record(bad)));
+            c.telegram_resume();
+            assert!(matches!(c.view().telegram, TelegramUi::Code { can_open_page: false, .. }), "{bad}");
+            assert_eq!(c.telegram_open_page(), None, "{bad}");
+            c.telegram_cancel();
+        }
+    }
+
+    #[test]
+    fn a_classic_request_saved_by_an_older_build_resumes_as_number_matching() {
+        let old = json!({"login_id": "abc", "verifier": "v", "expires_at": unix_now() + 200, "telegram_url": "https://t.me/MarzReality_bot?start=applogin_abc", "match_code": "47"});
+        let (c, _) = make(Some(old));
+        c.telegram_resume();
+        assert!(matches!(c.view().telegram, TelegramUi::Waiting { ref match_code, .. } if match_code == "47"));
+        assert_eq!(c.telegram_open_page(), None, "no page in the classic flow");
+        c.telegram_cancel();
+    }
+
+    #[test]
+    fn a_code_typed_while_offline_is_refused_and_the_request_stays() {
+        let (c, vault) = make(Some(code_record(&page())));
+        c.telegram_resume();
+        c.telegram_code("123 456".into());
+        assert!(wait(&c, |t| matches!(t, TelegramUi::Code { busy: false, error: Some(e), .. } if e == "network")), "{:?}", c.view().telegram);
+        assert!(wait(&c, |t| matches!(t, TelegramUi::Code { offline: true, .. })), "the poll says it is offline and keeps waiting");
+        assert!(vault.get(vault::PENDING_TELEGRAM).is_some());
+        c.telegram_code("12".into());
+        assert!(wait(&c, |t| matches!(t, TelegramUi::Code { busy: false, error: Some(e), .. } if e == "invalid_code_format")));
+        c.telegram_cancel();
+        assert!(matches!(c.view().telegram, TelegramUi::Idle));
+        assert!(vault.get(vault::PENDING_TELEGRAM).is_none());
+        assert_eq!(c.telegram_open_page(), None);
+    }
+
+    #[test]
+    fn a_failed_start_opens_nothing() {
+        let (c, _) = make(None);
+        assert_eq!(c.telegram_start("ru"), None);
+        assert!(matches!(c.view().telegram, TelegramUi::Failed { ref code } if code == "network"));
+    }
+
+    #[test]
+    fn an_expired_request_ends_while_offline() {
+        let mut r = code_record(&page());
+        r["expires_at"] = json!(unix_now() - 1);
+        let (c, vault) = make(Some(r));
+        c.telegram_resume();
+        assert!(wait(&c, |t| matches!(t, TelegramUi::Failed { code } if code == "login_expired")), "{:?}", c.view().telegram);
+        assert!(vault.get(vault::PENDING_TELEGRAM).is_none());
     }
 }

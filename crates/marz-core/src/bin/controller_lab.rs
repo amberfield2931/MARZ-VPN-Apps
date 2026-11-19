@@ -46,9 +46,10 @@ fn main() {
     check("helper.seen", wait(&c, 5, |v| v.helper_ok && v.engine == "disconnected"), "helper answers, tunnel off");
 
     // Sign-in, as a user does it.
-    c.telegram_start();
-    let code = wait(&c, 5, |v| matches!(v.telegram, TelegramUi::Waiting { .. }));
-    check("login.number_shown", code, "number first, Telegram only on the button");
+    c.telegram_start("en");
+    let code = wait(&c, 5, |v| matches!(v.telegram, TelegramUi::Waiting { .. } | TelegramUi::Code { .. }));
+    let flow = if matches!(c.view().telegram, TelegramUi::Code { .. }) { "code flow: request number and page" } else { "classic: number first, Telegram only on the button" };
+    check("login.request_shown", code, flow);
     let done = Command::new("sh").args(["-c", bot]).status().map(|s| s.success()).unwrap_or(false);
     check("login.bot_confirmed", done, "lab bot picked the same number");
     check("login.signed_in", wait(&c, 10, |v| v.signed_in && v.config_ready), "sync finished after confirmation");

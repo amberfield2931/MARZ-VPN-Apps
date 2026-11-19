@@ -235,17 +235,125 @@ impl AuthClock for SystemClock {
 
 // ---- API -------------------------------------------------------------------------------------------
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TelegramLogin {
-    pub telegram_url: String,
-    pub match_code: String,
-    pub expires_at: i64,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TelegramFlow {
+    /// Number matching: the app shows a number, the bot offers three (servers without the code flow).
+    Classic,
+    /// A code from the bot, entered on marzvpn.com/device (or in the app).
+    Code,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TelegramLogin {
+    pub flow: TelegramFlow,
+    /// Classic: t.me/<bot>?start=applogin_<id>. Code: t.me/<bot>?start=login_<REF> (may be empty).
+    pub telegram_url: String,
+    /// Classic only.
+    pub match_code: String,
+    pub expires_at: i64,
+    /// Code only: the public request number shown on the page and in the bot, e.g. "K7QP-9M2X".
+    pub reference: String,
+    /// Code only: the page with the browser-claim secret in its fragment. Never shown or logged; opened only when
+    /// `links::is_device_page` accepts it.
+    pub verification_url: String,
+}
+
+/// Progress words of the code flow (202 from confirm); anything else is ignored.
+pub const CODE_PROGRESS: [&str; 5] = ["waiting", "page_opened", "code_requested", "code_sent", "delivery_failed"];
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Pending {
+    pub progress: Option<String>,
+    pub attempts_left: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LoginProgress {
-    Pending,
+    Pending(Pending),
     Done,
+}
+
+/// The answer to a code typed in the app. Err from `enter_telegram_code` means the whole request is over.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CodeEntry {
+    SignedIn,
+    /// The page already approved this request (409 login_already_approved): the confirm poll finishes it.
+    Approved,
+    /// The request goes on: wrong or expired code, no code yet, rate limit, network.
+    Refused { code: String, attempts_left: Option<u32> },
+}
+
+fn api_locale(locale: &str) -> &'static str {
+    match locale.to_ascii_lowercase().as_str() {
+        "ru" => "ru",
+        "fa" => "fa",
+        "zh-cn" | "zh" => "zh-cn",
+        _ => "en",
+    }
+}
+
+fn text_of<'a>(j: &'a Value, k: &str) -> Option<&'a str> {
+    j.get(k).and_then(Value::as_str).filter(|s| !s.is_empty())
+}
+
+/// The vault record for a 200 from /v1/auth/telegram/start. No `verification_url` means the classic flow, exactly as
+/// before (an older server, or the code flow switched off).
+pub fn telegram_record(j: &Value, verifier: &str, now: i64) -> Option<Value> {
+    let login_id = text_of(j, "login_id")?;
+    let expires_in = |default: i64| j.get("expires_in").and_then(Value::as_i64).filter(|v| *v > 0).unwrap_or(default).min(3600);
+    match text_of(j, "verification_url") {
+        Some(url) => {
+            // Shown to the user only: letters, digits and one dash, as the server formats it.
+            let reference = text_of(j, "ref").filter(|r| r.len() <= 16 && r.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')).unwrap_or("");
+            Some(json!({"flow": "code", "login_id": login_id, "verifier": verifier, "expires_at": now + expires_in(600),
+                        "telegram_url": text_of(j, "telegram_url").unwrap_or(""), "match_code": "", "ref": reference, "verification_url": url}))
+        }
+        None => Some(json!({"login_id": login_id, "verifier": verifier, "expires_at": now + expires_in(300),
+                            "telegram_url": text_of(j, "telegram_url")?, "match_code": j.get("match_code").and_then(Value::as_str).unwrap_or("")})),
+    }
+}
+
+/// A saved request. Records written before the code flow have no `flow`: they are classic.
+pub fn telegram_login_from(p: &Value) -> Option<TelegramLogin> {
+    let expires_at = p.get("expires_at")?.as_i64()?;
+    if p.get("flow").and_then(Value::as_str) == Some("code") {
+        return Some(TelegramLogin {
+            flow: TelegramFlow::Code,
+            telegram_url: text_of(p, "telegram_url").unwrap_or("").into(),
+            match_code: String::new(),
+            expires_at,
+            reference: text_of(p, "ref").unwrap_or("").into(),
+            verification_url: text_of(p, "verification_url")?.into(),
+        });
+    }
+    Some(TelegramLogin {
+        flow: TelegramFlow::Classic,
+        telegram_url: text_of(p, "telegram_url")?.into(),
+        match_code: text_of(p, "match_code")?.into(),
+        expires_at,
+        reference: String::new(),
+        verification_url: String::new(),
+    })
+}
+
+/// Extra fields of a 202 from /v1/auth/telegram/confirm (code flow; absent in the classic flow).
+pub fn pending_of(j: &Value) -> Pending {
+    Pending {
+        progress: j.get("progress").and_then(Value::as_str).filter(|p| CODE_PROGRESS.contains(p)).map(str::to_string),
+        attempts_left: j.get("attempts_left").and_then(Value::as_u64).map(|v| v.min(100) as u32),
+    }
+}
+
+/// The code as the server takes it: six digits; spaces and dashes typed with it are dropped.
+pub fn normalize_code(code: &str) -> Option<String> {
+    let c: String = code.chars().filter(|c| !c.is_whitespace() && *c != '-').collect();
+    (c.len() == 6 && c.bytes().all(|b| b.is_ascii_digit())).then_some(c)
+}
+
+/// Whether an error from /v1/auth/telegram/code ends the request. A wrong or expired code, a code not asked for
+/// yet, a rate limit or a network failure do not: the person can try again while the request lives.
+pub fn code_error_is_final(status: u16, code: &str) -> bool {
+    matches!(status, 403 | 404 | 410) && code != "code_expired"
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -380,39 +488,54 @@ impl AppApi {
         self.auth.is_signed_in()
     }
 
-    pub fn start_telegram_login(&self) -> ApiResult<TelegramLogin> {
+    /// Asks for the code flow (`flow: code`); a server without it answers with the classic number matching, which
+    /// then runs exactly as before. `locale` picks the page language: ru, fa, zh-cn, else en.
+    pub fn start_telegram_login(&self, locale: &str) -> ApiResult<TelegramLogin> {
         let verifier = random_url_safe(48);
         let challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
-        let body = json!({"device": self.device_json()?, "code_challenge": challenge});
+        let body = json!({"device": self.device_json()?, "code_challenge": challenge, "flow": "code", "locale": api_locale(locale)});
         let r = self.call("POST", "/v1/auth/telegram/start", Some(&body), false, false);
         if r.code != 200 {
             return r.fail();
         }
-        let j = r.json();
         let bad = || ApiError { code: "invalid_response".into(), status: r.code };
-        let login_id = j.get("login_id").and_then(Value::as_str).ok_or_else(bad)?;
-        let telegram_url = j.get("telegram_url").and_then(Value::as_str).ok_or_else(bad)?;
-        let match_code = j.get("match_code").and_then(Value::as_str).unwrap_or("");
-        let expires_at = unix_now() + j.get("expires_in").and_then(Value::as_i64).unwrap_or(300);
-        // Kept with the request: returning from Telegram or an app restart shows the same number and
-        // keeps waiting for the same request.
-        let saved = self.vault.put(
-            vault::PENDING_TELEGRAM,
-            Some(json!({"login_id": login_id, "verifier": verifier, "expires_at": expires_at, "telegram_url": telegram_url, "match_code": match_code})),
-        );
-        if !saved {
+        let record = telegram_record(&r.json(), &verifier, unix_now()).ok_or_else(bad)?;
+        let login = telegram_login_from(&record).ok_or_else(bad)?;
+        // Kept with the request: returning from Telegram or the browser, or an app restart, shows the same request
+        // and keeps waiting for it.
+        if !self.vault.put(vault::PENDING_TELEGRAM, Some(record)) {
             return Err(ApiError::local("storage_unavailable"));
         }
-        Ok(TelegramLogin { telegram_url: telegram_url.into(), match_code: match_code.into(), expires_at })
+        Ok(login)
     }
 
     pub fn pending_telegram_login(&self) -> Option<TelegramLogin> {
-        let p = self.vault.get(vault::PENDING_TELEGRAM)?;
-        Some(TelegramLogin {
-            telegram_url: p.get("telegram_url")?.as_str().filter(|s| !s.is_empty())?.into(),
-            match_code: p.get("match_code")?.as_str().filter(|s| !s.is_empty())?.into(),
-            expires_at: p.get("expires_at")?.as_i64()?,
-        })
+        telegram_login_from(&self.vault.get(vault::PENDING_TELEGRAM)?)
+    }
+
+    /// The code from the bot, typed in the app instead of on the page: POST /v1/auth/telegram/code, signed with the
+    /// device key, with the request's PKCE verifier. 200 carries the same tokens as confirm.
+    pub fn enter_telegram_code(&self, code: &str) -> ApiResult<CodeEntry> {
+        let p = self.vault.get(vault::PENDING_TELEGRAM).ok_or_else(|| ApiError::local("login_not_found"))?;
+        let Some(code) = normalize_code(code) else {
+            return Ok(CodeEntry::Refused { code: "invalid_code_format".into(), attempts_left: None });
+        };
+        let body = json!({"login_id": p.get("login_id"), "code_verifier": p.get("verifier"), "code": code});
+        let r = self.call("POST", "/v1/auth/telegram/code", Some(&body), false, true);
+        let j = r.json();
+        match r.code {
+            200 => {
+                self.save_tokens(&j)?;
+                self.clear_pending_telegram(&p);
+                Ok(CodeEntry::SignedIn)
+            }
+            409 if r.error() == "login_already_approved" => Ok(CodeEntry::Approved),
+            status if code_error_is_final(status, &r.error()) => {
+                self.clear_pending_telegram(&p);
+                r.fail()
+            }
+            _ => Ok(CodeEntry::Refused { code: r.error(), attempts_left: j.get("attempts_left").and_then(Value::as_u64).map(|v| v.min(100) as u32) }),
+        }
     }
 
     pub fn poll_telegram_login(&self) -> ApiResult<LoginProgress> {
@@ -420,7 +543,7 @@ impl AppApi {
         let body = json!({"login_id": p.get("login_id"), "code_verifier": p.get("verifier")});
         let r = self.call("POST", "/v1/auth/telegram/confirm", Some(&body), false, true);
         match r.code {
-            202 => Ok(LoginProgress::Pending),
+            202 => Ok(LoginProgress::Pending(pending_of(&r.json()))),
             200 => {
                 self.save_tokens(&r.json())?;
                 self.vault.put(vault::PENDING_TELEGRAM, None);
@@ -431,6 +554,13 @@ impl AppApi {
                 self.vault.put(vault::PENDING_TELEGRAM, None);
                 r.fail()
             }
+        }
+    }
+
+    /// Only the request this answer was for: a new one started meanwhile stays.
+    fn clear_pending_telegram(&self, was: &Value) {
+        if self.vault.get(vault::PENDING_TELEGRAM).is_some_and(|now| now.get("login_id") == was.get("login_id")) {
+            self.vault.put(vault::PENDING_TELEGRAM, None);
         }
     }
 
@@ -694,7 +824,125 @@ mod tests {
         let d = std::env::temp_dir().join(format!("marz-api-test-{}-no", std::process::id()));
         let config = crate::tls::client_config_with(rustls::RootCertStore::empty()).unwrap();
         let api = AppApi::new(Endpoint::parse_with("https://127.0.0.1:1", config).unwrap(), Arc::new(Vault::open(&d, &No)));
-        assert_eq!(api.start_telegram_login().unwrap_err().code, "storage_unavailable");
+        assert_eq!(api.start_telegram_login("ru").unwrap_err().code, "storage_unavailable");
+    }
+
+    const CLAIM: &str = "AbCdEfGhIjKlMnOpQrStUvWxYz0123456789_-AbCd";
+
+    fn code_answer() -> Value {
+        json!({"login_id": "L".repeat(32), "flow": "code", "ref": "K7QP-9M2X", "verification_url": format!("https://marzvpn.com/ru/device/#c={CLAIM}"),
+               "telegram_url": "https://t.me/MarzReality_bot?start=login_K7QP9M2X", "bot_username": "MarzReality_bot", "expires_in": 600, "code_ttl": 300, "poll_interval": 3})
+    }
+
+    #[test]
+    fn a_code_answer_is_kept_as_the_code_flow() {
+        let rec = telegram_record(&code_answer(), "verifier", 1000).unwrap();
+        assert_eq!(rec["flow"], "code");
+        assert_eq!(rec["expires_at"], 1600);
+        assert_eq!(rec["verifier"], "verifier");
+        let l = telegram_login_from(&rec).unwrap();
+        assert_eq!(l.flow, TelegramFlow::Code);
+        assert_eq!(l.reference, "K7QP-9M2X");
+        assert!(l.match_code.is_empty());
+        assert!(crate::links::is_device_page(&l.verification_url));
+        assert_eq!(l.expires_at, 1600);
+        // Without expires_in the request lives the server's 10 minutes.
+        let mut a = code_answer();
+        a.as_object_mut().unwrap().remove("expires_in");
+        assert_eq!(telegram_record(&a, "v", 0).unwrap()["expires_at"], 600);
+    }
+
+    #[test]
+    fn no_verification_url_means_exactly_the_classic_flow() {
+        let classic = json!({"login_id": "L".repeat(32), "telegram_url": "https://t.me/MarzReality_bot?start=applogin_x", "match_code": "47", "expires_in": 300, "poll_interval": 2});
+        let rec = telegram_record(&classic, "v", 1000).unwrap();
+        // Byte for byte the record older builds wrote: no flow field.
+        assert_eq!(rec, json!({"login_id": "L".repeat(32), "verifier": "v", "expires_at": 1300, "telegram_url": "https://t.me/MarzReality_bot?start=applogin_x", "match_code": "47"}));
+        let l = telegram_login_from(&rec).unwrap();
+        assert_eq!((l.flow, l.match_code.as_str(), l.verification_url.as_str()), (TelegramFlow::Classic, "47", ""));
+        // An empty verification_url is no verification_url.
+        let mut odd = classic.clone();
+        odd["verification_url"] = json!("");
+        assert_eq!(telegram_login_from(&telegram_record(&odd, "v", 0).unwrap()).unwrap().flow, TelegramFlow::Classic);
+        // A classic answer without its link is invalid, as before.
+        assert!(telegram_record(&json!({"login_id": "x", "match_code": "47"}), "v", 0).is_none());
+        assert!(telegram_record(&json!({"telegram_url": "https://t.me/MarzReality_bot"}), "v", 0).is_none());
+    }
+
+    #[test]
+    fn a_pending_request_saved_by_an_older_build_still_reads_as_classic() {
+        let old = json!({"login_id": "abc", "verifier": "v", "expires_at": 99, "telegram_url": "https://t.me/MarzReality_bot?start=applogin_abc", "match_code": "12"});
+        let l = telegram_login_from(&old).unwrap();
+        assert_eq!(l, TelegramLogin { flow: TelegramFlow::Classic, telegram_url: "https://t.me/MarzReality_bot?start=applogin_abc".into(), match_code: "12".into(), expires_at: 99, reference: String::new(), verification_url: String::new() });
+        assert!(telegram_login_from(&json!({"login_id": "abc", "expires_at": 99, "telegram_url": "u"})).is_none(), "classic needs its number");
+        assert!(telegram_login_from(&json!({"flow": "code", "expires_at": 99})).is_none(), "code needs its page");
+        assert!(telegram_login_from(&json!({"flow": "something-new", "expires_at": 99, "telegram_url": "u", "match_code": "12"})).is_some_and(|l| l.flow == TelegramFlow::Classic));
+    }
+
+    #[test]
+    fn a_request_survives_a_restart_in_the_vault() {
+        let v = vault("pending");
+        assert!(v.put(vault::PENDING_TELEGRAM, telegram_record(&code_answer(), "verifier", 5)));
+        let config = crate::tls::client_config_with(rustls::RootCertStore::empty()).unwrap();
+        let api = AppApi::new(Endpoint::parse_with("https://127.0.0.1:1", config).unwrap(), Arc::new(Vault::open(&std::env::temp_dir().join(format!("marz-api-test-{}-pending", std::process::id())), &FixedKey([3; 32]))));
+        let l = api.pending_telegram_login().unwrap();
+        assert_eq!((l.flow, l.reference.as_str(), l.expires_at), (TelegramFlow::Code, "K7QP-9M2X", 605));
+        api.cancel_telegram_login();
+        assert!(api.pending_telegram_login().is_none());
+    }
+
+    #[test]
+    fn odd_references_are_not_shown() {
+        let mut a = code_answer();
+        a["ref"] = json!("<b>x</b>");
+        assert_eq!(telegram_record(&a, "v", 0).unwrap()["ref"], "");
+    }
+
+    #[test]
+    fn progress_and_attempts_of_a_202() {
+        assert_eq!(pending_of(&json!({"state": "pending", "progress": "code_sent", "attempts_left": 4})), Pending { progress: Some("code_sent".into()), attempts_left: Some(4) });
+        assert_eq!(pending_of(&json!({"state": "pending"})), Pending::default(), "classic 202");
+        assert_eq!(pending_of(&json!({"state": "pending", "progress": "<script>", "attempts_left": -1})), Pending::default());
+        for p in CODE_PROGRESS {
+            assert_eq!(pending_of(&json!({"progress": p})).progress.as_deref(), Some(p));
+        }
+    }
+
+    #[test]
+    fn codes_are_six_digits() {
+        assert_eq!(normalize_code(" 123 456 ").as_deref(), Some("123456"));
+        assert_eq!(normalize_code("123-456").as_deref(), Some("123456"));
+        for bad in ["12345", "1234567", "12a456", "", "١٢٣٤٥٦"] {
+            assert!(normalize_code(bad).is_none(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn which_code_errors_end_the_request() {
+        for (status, code) in [(403, "login_code_attempts"), (410, "login_expired"), (403, "login_rejected"), (404, "login_not_found"), (410, "login_already_used"), (403, "pilot_closed")] {
+            assert!(code_error_is_final(status, code), "{code}");
+        }
+        for (status, code) in [(400, "invalid_code"), (400, "invalid_code_format"), (410, "code_expired"), (409, "code_not_requested"), (429, "rate_limited"), (0, "network"), (503, "upstream_unavailable")] {
+            assert!(!code_error_is_final(status, code), "{code}");
+        }
+    }
+
+    #[test]
+    fn the_page_language_follows_the_app() {
+        assert_eq!([api_locale("ru"), api_locale("fa"), api_locale("zh-cn"), api_locale("zh-CN"), api_locale("en"), api_locale("de")], ["ru", "fa", "zh-cn", "zh-cn", "en", "en"]);
+    }
+
+    #[test]
+    fn code_entry_needs_a_request_and_refuses_bad_input_without_a_request() {
+        let v = vault("entry");
+        let config = crate::tls::client_config_with(rustls::RootCertStore::empty()).unwrap();
+        let api = AppApi::new(Endpoint::parse_with("https://127.0.0.1:1", config).unwrap(), v.clone());
+        assert_eq!(api.enter_telegram_code("123456").unwrap_err().code, "login_not_found");
+        v.put(vault::PENDING_TELEGRAM, telegram_record(&code_answer(), "v", unix_now()));
+        assert_eq!(api.enter_telegram_code("12"), Ok(CodeEntry::Refused { code: "invalid_code_format".into(), attempts_left: None }));
+        // Unreachable server: a network refusal, and the request stays.
+        assert_eq!(api.enter_telegram_code("123456"), Ok(CodeEntry::Refused { code: "network".into(), attempts_left: None }));
+        assert!(api.pending_telegram_login().is_some());
     }
 
     #[test]

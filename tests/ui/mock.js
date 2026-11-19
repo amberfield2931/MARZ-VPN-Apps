@@ -51,6 +51,19 @@ const S = {
   servers: { ...signedIn, engine: 'connected', wanted: true, traffic: 'ok', live_ms: 84, active_route: 'srv-a2', choice: 'a2', availability: { a1: 'ok', a2: 'ok', a3: 'failed' } },
   telegram: {},
   telegram_wait: { telegram: { state: 'waiting', telegram_url: 'https://t.me/MarzReality_bot', match_code: '47', expires_at: now + 262 } },
+  // Telegram code sign-in (code flow). __MARZ_TG_MANUAL__ opens the in-app code entry.
+  tg_code_waiting: { telegram: { state: 'code', ref: 'K7QP-9M2X', telegram_url: 'https://t.me/MarzReality_bot?start=login_K7QP9M2X', expires_at: now + 547, progress: 'waiting', attempts_left: 5, can_open_page: true, offline: false, busy: false, error: null } },
+  tg_code_page_opened: { telegram: { ...{ state: 'code', ref: 'K7QP-9M2X', telegram_url: 'https://t.me/MarzReality_bot?start=login_K7QP9M2X', expires_at: now + 547, progress: 'waiting', attempts_left: 5, can_open_page: true, offline: false, busy: false, error: null }, progress: 'page_opened' } },
+  tg_code_sent: { telegram: { ...{ state: 'code', ref: 'K7QP-9M2X', telegram_url: 'https://t.me/MarzReality_bot?start=login_K7QP9M2X', expires_at: now + 547, progress: 'waiting', attempts_left: 5, can_open_page: true, offline: false, busy: false, error: null }, progress: 'code_sent' } },
+  tg_code_delivery_failed: { telegram: { ...{ state: 'code', ref: 'K7QP-9M2X', telegram_url: 'https://t.me/MarzReality_bot?start=login_K7QP9M2X', expires_at: now + 547, progress: 'waiting', attempts_left: 5, can_open_page: true, offline: false, busy: false, error: null }, progress: 'delivery_failed' } },
+  tg_code_offline: { telegram: { ...{ state: 'code', ref: 'K7QP-9M2X', telegram_url: 'https://t.me/MarzReality_bot?start=login_K7QP9M2X', expires_at: now + 547, progress: 'waiting', attempts_left: 5, can_open_page: true, offline: false, busy: false, error: null }, progress: 'code_sent', offline: true } },
+  tg_code_manual: { telegram: { ...{ state: 'code', ref: 'K7QP-9M2X', telegram_url: 'https://t.me/MarzReality_bot?start=login_K7QP9M2X', expires_at: now + 547, progress: 'waiting', attempts_left: 5, can_open_page: true, offline: false, busy: false, error: null }, progress: 'code_sent' } },
+  tg_code_wrong: { telegram: { ...{ state: 'code', ref: 'K7QP-9M2X', telegram_url: 'https://t.me/MarzReality_bot?start=login_K7QP9M2X', expires_at: now + 547, progress: 'waiting', attempts_left: 5, can_open_page: true, offline: false, busy: false, error: null }, progress: 'code_sent', attempts_left: 3, error: 'invalid_code' } },
+  tg_code_expired: { telegram: { ...{ state: 'code', ref: 'K7QP-9M2X', telegram_url: 'https://t.me/MarzReality_bot?start=login_K7QP9M2X', expires_at: now + 547, progress: 'waiting', attempts_left: 5, can_open_page: true, offline: false, busy: false, error: null }, progress: 'code_sent', error: 'code_expired' } },
+  tg_code_failed_attempts: { telegram: { state: 'failed', code: 'login_code_attempts' } },
+  tg_code_failed_expired: { telegram: { state: 'failed', code: 'login_expired' } },
+  tg_code_failed_unavailable: { telegram: { state: 'failed', code: 'upstream_unavailable' } },
+  login: {},
   email: {},
   email_code: { email: { state: 'enter_code', email: 'user@example.com', sent_at: now - 20, busy: false, error: 'invalid_code' } },
   plans: signedIn,
@@ -74,9 +87,10 @@ const S = {
   settings_update_failed: { ...signedIn, update: { state: 'failed' } },
   home_update: { ...signedIn, engine: 'connected', wanted: true, traffic: 'ok', live_ms: 84, active_route: 'srv-a1', choice: 'a1', kill_switch: 'armed', update: { state: 'available', version: '0.1.2-7' } },
 };
-const SCREEN = { servers: 'servers', servers_unknown: 'servers', telegram: 'telegram', telegram_blocked: 'telegram', telegram_wait: 'telegram', email: 'email', email_code: 'email', plans: 'plans', plans_out: 'plans', plans_pro_off: 'plans', plans_pro_on: 'plans', plans_out_pro_on: 'plans', plans_pro_holder: 'plans', plans_unlimited_holder: 'plans', plans_unlimited_holder_pro_off: 'plans', settings_blocked: 'settings', settings_ks_off: 'settings', settings: 'settings', settings_update_checking: 'settings', settings_update_latest: 'settings', settings_update_available: 'settings', settings_update_failed: 'settings' };
+const SCREEN = { servers: 'servers', servers_unknown: 'servers', telegram: 'telegram', telegram_blocked: 'telegram', telegram_wait: 'telegram', login: 'login', tg_code_waiting: 'telegram', tg_code_page_opened: 'telegram', tg_code_sent: 'telegram', tg_code_delivery_failed: 'telegram', tg_code_offline: 'telegram', tg_code_manual: 'telegram', tg_code_wrong: 'telegram', tg_code_expired: 'telegram', tg_code_failed_attempts: 'telegram', tg_code_failed_expired: 'telegram', tg_code_failed_unavailable: 'telegram', email: 'email', email_code: 'email', plans: 'plans', plans_out: 'plans', plans_pro_off: 'plans', plans_pro_on: 'plans', plans_out_pro_on: 'plans', plans_pro_holder: 'plans', plans_unlimited_holder: 'plans', plans_unlimited_holder_pro_off: 'plans', settings_blocked: 'settings', settings_ks_off: 'settings', settings: 'settings', settings_update_checking: 'settings', settings_update_latest: 'settings', settings_update_available: 'settings', settings_update_failed: 'settings' };
 const view = { ...base, ...S[scenario] };
 window.__TAURI_INTERNALS__ = { invoke: async cmd => cmd === 'get_state' ? view : undefined };
 window.__MARZ_START_SCREEN__ = SCREEN[scenario] || null;
 // How Plans was opened: buy (default), renew or change_plan, as the home buttons do.
 window.__MARZ_PLANS_ACTION__ = q.get('action') || { plans_pro_off: 'renew', plans_pro_on: 'change_plan', plans_pro_holder: 'renew', plans_unlimited_holder: 'change_plan', plans_unlimited_holder_pro_off: 'change_plan' }[scenario] || null;
+window.__MARZ_TG_MANUAL__ = scenario === 'tg_code_manual';

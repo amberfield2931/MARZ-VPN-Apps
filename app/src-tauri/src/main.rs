@@ -94,9 +94,28 @@ fn route_check_start(c: C) {
 fn route_check_stop(c: C) {
     c.stop_route_check();
 }
+/// The page of the Telegram code sign-in opens on this button press (a user gesture). The controller returns only a
+/// link of the exact marzvpn.com/device shape; it is checked against the allow-list once more here.
+#[tauri::command(async)]
+fn telegram_start(c: C, locale: Option<String>) {
+    if let Some(url) = c.telegram_start(locale.as_deref().unwrap_or("en")) {
+        open_device_page(&url);
+    }
+}
 #[tauri::command]
-fn telegram_start(c: C) {
-    c.telegram_start();
+fn telegram_open_page(c: C) {
+    if let Some(url) = c.telegram_open_page() {
+        open_device_page(&url);
+    }
+}
+#[tauri::command]
+fn telegram_code(c: C, code: String) {
+    c.telegram_code(code);
+}
+fn open_device_page(url: &str) {
+    if marz_core::links::allowed_external(url) && marz_core::links::is_device_page(url) {
+        launch(url);
+    }
 }
 #[tauri::command]
 fn telegram_resume(c: C) {
@@ -274,7 +293,7 @@ fn main() {
             }
         })
         .invoke_handler(tauri::generate_handler![
-            get_state, toggle, select_server, route_check_start, route_check_stop, telegram_start, telegram_resume, telegram_cancel,
+            get_state, toggle, select_server, route_check_start, route_check_stop, telegram_start, telegram_open_page, telegram_code, telegram_resume, telegram_cancel,
             email_send, email_verify, email_resend, email_reset, logout, mark_welcome_seen, set_theme, set_language, on_visible,
             checkout_start, checkout_retry, checkout_check, checkout_reset, email_link_start, email_link_confirm, email_unlink, open_external, emergency_off, set_kill_switch, quit_disconnect, quit_cancel, check_updates, catalog_refresh
         ])

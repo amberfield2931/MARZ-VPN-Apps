@@ -3,17 +3,21 @@
 Official client apps of [MARZ VPN](https://marzvpn.com) for Android, Windows and Linux.
 Downloads are in [Releases](../../releases).
 
-## Current versions — release [stable-2026-11-16](../../releases/tag/stable-2026-11-16)
+## Current versions
 
-| Platform | Version | Channel | File | SHA-256 |
-|---|---|---|---|---|
-| Android 7.0+ (arm64-v8a) | 1.0.3 (versionCode 1000390) | **Stable** | `MARZ-VPN-Android-1.0.3.apk` | `ca1983484f093edc940f1797ffdefe5a8828e6df179e25d6bc32bd8d1bfd1577` |
-| Linux amd64 (.deb, systemd) | 0.1.2-8 | **Stable** | `MARZ-VPN-0.1.2-8-amd64.deb` | `62f5ae7fdd7b56d5d883884aa5057c50cdce682267f3213af2dc546d62a88796` |
-| Windows 11 x64 | 0.1.9 | **Beta** | `MARZ-VPN-Setup-0.1.9.exe` | `c3d661d0c878b175bab8ee6b11797496d0626f002fa67e0fba9eaf53b01713b4` |
+| Platform | Version | Channel | Release | File | SHA-256 |
+|---|---|---|---|---|---|
+| Android 7.0+ (arm64-v8a) | 1.0.4 (versionCode 1000400) | **Stable** | [stable-2026-11-19](../../releases/tag/stable-2026-11-19) | `MARZ-VPN-Android-1.0.4.apk` | `c2537bbcaa3893a9d5f694b63d8d3fa405984b81a4a9df92c83eac3d406a8727` |
+| Linux amd64 (.deb, systemd) | 0.1.2-9 | **Stable** | [stable-2026-11-19](../../releases/tag/stable-2026-11-19) | `MARZ-VPN-0.1.2-9-amd64.deb` | `bcba8034f95db01211f433a1b27ccc97f3995594c7ce780ff68c9d6fc664cceb` |
+| Windows 11 x64 | 0.1.9 | **Beta** | [stable-2026-11-16](../../releases/tag/stable-2026-11-16) | `MARZ-VPN-Setup-0.1.9.exe` | `c3d661d0c878b175bab8ee6b11797496d0626f002fa67e0fba9eaf53b01713b4` |
 
-Windows 0.1.9 is a **Beta**: it passed automated tests and tests under Wine, but has not been run on
-real Windows 11 yet, so its Kill Switch on real Windows is not yet confirmed. Windows 0.1.8 (Stable)
-stays available in [stable-2026-11-05-2](../../releases/tag/stable-2026-11-05-2). The Windows installer
+New in Android 1.0.4 and Linux 0.1.2-9: sign in with a 6-digit code that @MarzReality_bot sends in Telegram.
+On a computer the app opens a page on marzvpn.com with a QR code; the code can be typed there or in the app.
+
+Windows is a **Beta**: builds pass automated tests and tests under Wine, but have not been run on real
+Windows 11 yet, so the Kill Switch on real Windows is not yet confirmed. The source of the next Windows Beta,
+0.1.10, is already on `main`; its installer is published separately. Windows 0.1.8 (Stable) stays available in
+[stable-2026-11-05-2](../../releases/tag/stable-2026-11-05-2). The Windows installer
 has no digital signature yet, so SmartScreen may warn you. The Android app has no Kill Switch of its own.
 There is no MARZ VPN app for iPhone or macOS; the subscription works there in compatible third-party clients.
 
@@ -28,7 +32,7 @@ Instructions: [Android](https://marzvpn.com/android), [Windows](https://marzvpn.
 - **Android:** install the APK. A new version installs over the old one and keeps your sign-in and
   settings (all releases are signed with the same certificate,
   SHA-256 `341f9b40054fafe26ce3afd2cd633f727d0aef1045d641b96c4c59990a10ff6a`).
-- **Linux:** `sudo apt install ./MARZ-VPN-0.1.2-8-amd64.deb` installs or updates. If you ever lose the
+- **Linux:** `sudo apt install ./MARZ-VPN-0.1.2-9-amd64.deb` installs or updates. If you ever lose the
   internet after a crash: `sudo /usr/lib/marzvpn/marzvpn-helper --recover` (`RECOVERY-LINUX.txt`).
 - **Windows:** run the installer; it updates an existing install. Recovery: `RECOVERY-WINDOWS.txt`.
 
@@ -42,18 +46,19 @@ All apps are free software under **GPL-3.0-or-later** and come with ABSOLUTELY N
 | What | Where |
 |---|---|
 | **Complete corresponding source** of every published build | the `*-corresponding-source.tar` files in each release (also on marzvpn.com and SourceForge). They hold the app source, the sing-box engine and every Go module it links, the Rust crates, the LGPL sources (WinDivert), license texts and build instructions |
-| MARZ VPN Desktop (Windows and Linux): app, helper, engine overlay, packaging | this repository. `main` and tag [`desktop-0.1.9-linux-0.1.2-8`](../../tree/desktop-0.1.9-linux-0.1.2-8) are the source of Windows 0.1.9 and of the Linux 0.1.2-8 app |
-| MARZ VPN for Android | [MARZ-VPN-Android](https://github.com/amberfield2931/MARZ-VPN-Android) (`main` = 1.0.3, one tag per version) |
+| MARZ VPN Desktop (Windows and Linux): app, helper, engine overlay, packaging | this repository. `main` and tag [`desktop-0.1.10-linux-0.1.2-9`](../../tree/desktop-0.1.10-linux-0.1.2-9) are the source of Windows 0.1.10 and of the Linux 0.1.2-9 app; tag [`desktop-0.1.9-linux-0.1.2-8`](../../tree/desktop-0.1.9-linux-0.1.2-8) is Windows 0.1.9 / Linux 0.1.2-8 |
+| MARZ VPN for Android | [MARZ-VPN-Android](https://github.com/amberfield2931/MARZ-VPN-Android) (`main` = 1.0.4, one tag per version) |
 
 Notes on the desktop source:
-- The `main` tree is the app part of `MARZ-VPN-Desktop-0.1.2-8-0.1.9-corresponding-source.tar`, unchanged
+- The `main` tree is the app part of `MARZ-VPN-Desktop-0.1.2-9-0.1.10-corresponding-source.tar`, unchanged
   (plus this README).
-- The Linux package 0.1.2-8 carries the helper `marzvpn-helper` built from the 0.1.2-2 helper tree. That
+- The Linux package 0.1.2-9 carries the helper `marzvpn-helper` built from the 0.1.2-2 helper tree. That
   helper has been byte-identical since 0.1.2-2. Its source is `marzvpn-desktop-0.1.2-2-linux-helper.tar.gz`
   inside the same tar; it is not the helper code on `main`.
 - The git tag `stable-2026-11-16` points to an earlier documentation commit whose tree is still the
   0.1.8 / 0.1.2-7 source. The source of the stable-2026-11-16 builds is the tar in that release and the
-  commit tagged `desktop-0.1.9-linux-0.1.2-8`.
+  commit tagged `desktop-0.1.9-linux-0.1.2-8`. The tag `stable-2026-11-19` points to the
+  `desktop-0.1.10-linux-0.1.2-9` commit.
 - Build instructions: [`BUILD-INSTRUCTIONS.md`](BUILD-INSTRUCTIONS.md) and `README.txt` in the tar.
 
 Third-party components and their licenses: [`NOTICE.md`](NOTICE.md),

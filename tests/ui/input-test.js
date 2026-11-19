@@ -93,6 +93,48 @@ const done = async o => { await fetch('/__result', { method: 'POST', body: JSON.
   const countdown = [...document.querySelectorAll('.muted')].map(e => e.textContent).join(); await ticks();
   check('resend countdown keeps running while the field is focused', [...document.querySelectorAll('.muted')].map(e => e.textContent).join() !== countdown, true);
 
+  // Telegram code sign-in: the in-app code field (fallback to the page) and the buttons of the code screen.
+  const calls = [];
+  window.__TAURI_INTERNALS__.invoke = async (cmd, a) => { if (cmd !== 'get_state') calls.push([cmd, a]); return cmd === 'get_state' ? view : undefined; };
+  const tgState = (extra = {}) => ({ state: 'code', ref: 'K7QP-9M2X', telegram_url: 'https://t.me/MarzReality_bot?start=login_K7QP9M2X', expires_at: Math.floor(Date.now() / 1000) + 500,
+    progress: 'code_sent', attempts_left: 5, can_open_page: true, offline: false, busy: false, error: null, ...extra });
+  view.signed_in = false; ui.tgManual = false; screen = 'telegram'; stack = ['home', 'login']; view.telegram = tgState(); update({ ...view }); await wait(50);
+  check('tg code: entry hidden until asked', !!field('tgcode'), false);
+  check('tg code: request number shown', document.querySelector('.code')?.textContent, 'K7QP-9M2X');
+  const press = text => { const b = [...document.querySelectorAll('button[data-h]')].find(x => x.textContent.trim() === text); b?.click(); return !!b; };
+  calls.length = 0; press(t('desktop_tg_open_page')); await wait(30);
+  check('tg code: open the page again', calls.map(c => c[0]).join(), 'telegram_open_page');
+  press(t('desktop_tg_enter_here')); await wait(30);
+  node = await start('tgcode');
+  await typeChars('12a3 4-5', 130);
+  check('tg code keeps digits only', field('tgcode').value, '12345');
+  check('tg code field never replaced', field('tgcode') === node, true);
+  view.telegram = tgState({ progress: 'delivery_failed' }); update({ ...view }); await wait(30);
+  check('tg code field survives a progress change', field('tgcode') === node && field('tgcode').value === '12345', true);
+  await typeChars('67', 10);
+  check('tg code stops at six digits', field('tgcode').value, '123456');
+  check('tg code digits are visible, not masked', field('tgcode').type, 'text');
+  check('tg code runs left to right', field('tgcode').getAttribute('dir'), 'ltr');
+  await ticks();
+  calls.length = 0; press(t('login_email_verify')); await wait(30);
+  check('tg code: sign-in button sends the digits', JSON.stringify(calls.find(c => c[0] === 'telegram_code')?.[1]), JSON.stringify({ code: '123456' }));
+  view.telegram = tgState({ error: 'invalid_code', attempts_left: 2 }); update({ ...view }); await wait(30);
+  check('tg code: wrong code says attempts left', document.querySelector('.err')?.textContent, t('desktop_tg_err_wrong', new Intl.NumberFormat(lang).format(2)));
+  view.telegram = tgState({ error: 'code_expired' }); update({ ...view }); await wait(30);
+  check('tg code: expired code asks the bot for a new one', document.querySelector('.err')?.textContent, t('desktop_tg_err_code_expired'));
+  calls.length = 0; press(t('desktop_tg_use_email')); await wait(30);
+  check('tg code: continue with email cancels and opens email', calls.map(c => c[0]).join() + ' ' + screen, 'telegram_cancel email');
+  goBack(); await wait(30);
+  check('tg code: back from email goes to the chooser', screen, 'login');
+  view.telegram = { state: 'idle' }; update({ ...view }); screen = 'telegram'; render(); await wait(30);
+  calls.length = 0; press(t('desktop_tg_start')); await wait(30);
+  check('tg start sends the page language', JSON.stringify(calls.find(c => c[0] === 'telegram_start')?.[1]), JSON.stringify({ locale: { ru: 'ru', fa: 'fa', 'zh-CN': 'zh-cn' }[lang] ?? 'en' }));
+  view.telegram = { state: 'failed', code: 'login_code_attempts' }; update({ ...view }); await wait(30);
+  check('tg: too many wrong codes', document.querySelector('.err')?.textContent, t('desktop_tg_err_attempts'));
+  view.telegram = { state: 'failed', code: 'upstream_unavailable' }; update({ ...view }); await wait(30);
+  check('tg: unavailable suggests email', document.querySelector('.err')?.textContent + '|' + [...document.querySelectorAll('button')].some(b => b.textContent.trim() === t('desktop_tg_use_email')), t('desktop_tg_err_unavailable') + '|true');
+  view.telegram = { state: 'idle' }; window.__TAURI_INTERNALS__.invoke = async cmd => cmd === 'get_state' ? view : undefined;
+
   // Settings: signed in, linking an email.
   const signed = { signed_in: true, account: { id: 'acc', identities: [{ kind: 'telegram', display: '@te***', id: 'i1' }], vpn_source: 'telegram' }, email: { state: 'enter_email' } };
   await open('settings', signed, 'linkEmail');
