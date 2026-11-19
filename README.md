@@ -9,14 +9,14 @@ Downloads are in [Releases](../../releases).
 |---|---|---|---|---|---|
 | Android 7.0+ (arm64-v8a) | 1.0.4 (versionCode 1000400) | **Stable** | [stable-2026-11-19](../../releases/tag/stable-2026-11-19) | `MARZ-VPN-Android-1.0.4.apk` | `c2537bbcaa3893a9d5f694b63d8d3fa405984b81a4a9df92c83eac3d406a8727` |
 | Linux amd64 (.deb, systemd) | 0.1.2-9 | **Stable** | [stable-2026-11-19](../../releases/tag/stable-2026-11-19) | `MARZ-VPN-0.1.2-9-amd64.deb` | `bcba8034f95db01211f433a1b27ccc97f3995594c7ce780ff68c9d6fc664cceb` |
-| Windows 11 x64 | 0.1.9 | **Beta** | [stable-2026-11-16](../../releases/tag/stable-2026-11-16) | `MARZ-VPN-Setup-0.1.9.exe` | `c3d661d0c878b175bab8ee6b11797496d0626f002fa67e0fba9eaf53b01713b4` |
+| Windows 11 x64 | 0.1.10 | **Beta** | [stable-2026-11-19](../../releases/tag/stable-2026-11-19) | `MARZ-VPN-Setup-0.1.10.exe` | `0ecdc884f0f4087bada4f52ecf32d0f0144dc7ffa2b744aeba28b35c0cc81663` |
 
-New in Android 1.0.4 and Linux 0.1.2-9: sign in with a 6-digit code that @MarzReality_bot sends in Telegram.
+New in Android 1.0.4, Linux 0.1.2-9 and Windows 0.1.10: sign in with a 6-digit code that @MarzReality_bot sends in Telegram.
 On a computer the app opens a page on marzvpn.com with a QR code; the code can be typed there or in the app.
 
-Windows is a **Beta**: builds pass automated tests and tests under Wine, but have not been run on real
-Windows 11 yet, so the Kill Switch on real Windows is not yet confirmed. The source of the next Windows Beta,
-0.1.10, is already on `main`; its installer is published separately. Windows 0.1.8 (Stable) stays available in
+Windows 0.1.10 is a **Beta**: it passed automated tests and tests under Wine, but has not been run on real
+Windows 11 yet, so its Kill Switch and DNS protection on real Windows are not yet confirmed. Windows 0.1.9 (Beta)
+stays available in [stable-2026-11-16](../../releases/tag/stable-2026-11-16) and Windows 0.1.8 (Stable) in
 [stable-2026-11-05-2](../../releases/tag/stable-2026-11-05-2). The Windows installer
 has no digital signature yet, so SmartScreen may warn you. The Android app has no Kill Switch of its own.
 There is no MARZ VPN app for iPhone or macOS; the subscription works there in compatible third-party clients.
